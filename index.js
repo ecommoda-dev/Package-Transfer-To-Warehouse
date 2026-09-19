@@ -33,7 +33,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.2.0';
+const WORKER_VERSION = '1.3.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -94,25 +94,45 @@ const ZONE_IN_SCOPE = new Set(['Cairo+Giza', 'Show_Room']);
 const COURIER_BOSTA = 'Bosta';
 
 // ─── §CONSTANTS::caps — سلسلة السقوف التلاتة (worker-builder ⑪) ───
-// ① الواجهة    CHUNK           = —    ← مفيش دفعة: السكان **فوري**، أوردر لكل نداء
-// ② الـ Worker  MAX_BATCH       = —    ← مفيش endpoint بياخد مصفوفة
-// ③ شوبيفاي     QUEUE_PAGE_SIZE = 50   ← نفس رقم أداة المكتب بالحرف: الاستعلام
-//                                         بـ١١ ميتافيلد لكل نود. ⛔ متطلّعهاش
-//                                         لـ100 من غير ما تقرا actualQueryCost.
-const QUEUE_PAGE_SIZE = 50;
-// 🔴 **٢٠ صفحة = ١٬٠٠٠ أوردر لكل استعلام (قرار أحمد 19-09-2026) — كان ٦.**
-//    الرقم ٦ اتنسخ من أداة المكتب، و**النسخ ده كان غلط**: هناك المصدر
-//    `manual_status:'Ready'` وهي حالة **عابرة** فعددها عشرات؛ هنا المصدر
-//    `Returned` و`Cancelled`، وهما حالتان **نهائيتان بتتراكم** — كل مرتجع
-//    وكل ملغي من الأرضية لحد النهاردة بيطابق. النتيجة إن السقف كان بيتضرب
-//    **من أول يوم**، والطابور بيقول رقم أقل من الحقيقة وبانر بيقول إنه أقل.
-// ⚠️ **والثمن المعلن: زمن الجلب الأول أطول** (لحد ٢٠ نداء متتالي لكل
-//    استعلام × تلات استعلامات بالتوازي) وتكلفة استعلام أعلى على شوبيفاي.
-//    ⛔ متطلّعش `QUEUE_PAGE_SIZE` لـ100 عشان تقلّل النداءات من غير ما تقرا
-//       `actualQueryCost` — الاستعلام بـ١١ ميتافيلد لكل نود.
-// ⚠️ **وهو لسه حارس حلقة مش سقف بيانات** — لو اتضرب، `truncated` بيرجع
-//    والبانر بيظهر. ⛔ ممنوع يتشال خالص.
-const QUEUE_MAX_PAGES = 20;         // حارس حلقة — 1000 أوردر لكل استعلام
+// ① الواجهة    CHUNK                = —    ← مفيش دفعة: السكان **فوري**، أوردر لكل نداء
+// ② الـ Worker  MAX_BATCH            = —    ← مفيش endpoint بياخد مصفوفة
+// ③ شوبيفاي     STEP1_PAGE_SIZE=250 · STEP2_CHUNK=50   ← تمريرتين مش واحدة من v1.3.0 — تحت §QUEUE
+//
+// 🔴 **v1.2.0 كانت صفحة واحدة بـ٥٠ صف × ١١ ميتافيلد — وده اللي أنتج `THROTTLED`
+//    فعليًا على المتجر الحقيقي** (سكرين شوت حي على الشاشة الرئيسية — راجع
+//    `docs/query-cost-experiment.md` بريبو `Warehouse-Operations-Center`).
+//    ٢٠ صفحة = ١٬٠٠٠ أوردر لكل استعلام (قرار أحمد 19-09-2026 — كان ٦ منسوخ غلط
+//    من أداة المكتب: هناك المصدر `Ready` عابر فعدده عشرات؛ هنا `Returned`/
+//    `Cancelled` بيتراكموا). المشكلة الحقيقية مكنتش رقم الصفحة — كانت إن
+//    الـ ٢٠ صفحة دي بتجيب **كل** الحقول التقيلة (زون · مندوب · وقتَي تغليف ·
+//    عهدتَي طرد) لكل أوردر **مطابق للحالة بس**، بينما شرط العهدة (`Office`)
+//    بيستبعد الأغلبية **بعد** الجلب — التكلفة كانت بتتدفع كاملة على أوردرات
+//    هتترمى في الآخر.
+//
+// 🔴 **من v1.3.0: تمريرتين بدل واحدة — تجربة، التفاصيل والقرارات المفتوحة في
+//    `docs/query-cost-experiment.md`.**
+//    ① تمريرة رخيصة (`STEP1_FIELDS` تحت — ٦ حقول بس) على نفس التلات استعلامات
+//       القديمة، بسقف صفحة أعلى (`٢٥٠`) لأنها أرخص بمراحل من نفس عيلة استعلام
+//       `print.html`/`pack.html`.
+//    ② فلترة العهدة (`Office`) بتحصل **هنا في الـ Worker** على نتيجة التمريرة
+//       الأولى، بنفس أولوية الماكينة اللي `wocWarehouseGate` بتطبّقها بالحرف
+//       (`mergeStep1` تحت) — مش فلتر `query` (لسه مستحيل، القيد ما اتلغاش).
+//    ③ تمريرة تانية `nodes(ids:)` بكامل `ORDER_FIELDS` **للمرشّحين بس** (اللي
+//       عدّوا فلتر العهدة)، على دفعات `STEP2_CHUNK`.
+// ⚠️ **الكسب مش لأن `nodes(ids:)` أرخص من `orders(query:)` لكل عنصر — التكلفة
+//    لكل حقل تقريبًا نفسها.** الكسب إن الحقول التقيلة بتتجاب لعدد أوردرات
+//    **أقل** (المرشّحين بس)، مش لكل أوردر مطابق لحالة S1/S2.
+// ⛔ **وده مش حل لمشكلة إن `package_whereabouts` مش Admin filterable — القيد
+//    نفسه لسه موجود** وبيتجاهل في صمت لو اتحط في `query` مباشرة. التمريرتين
+//    دول تخفيف لتكلفة القيد، مش إلغاء له. (والقيد الأصلي ممكن يتلغى لو
+//    الميتافيلد اتفعّل عليه Filtering من إعدادات شوبيفاي — بس ده مورد نادر:
+//    سقف ٥ تعريفات فلترة بس لكل مورد على مستوى المتجر كله. بند مفتوح منفصل
+//    في `docs/query-cost-experiment.md`.)
+const STEP1_PAGE_SIZE = 250;   // تمريرة ١ — ٦ حقول بس، نفس رتبة تكلفة print.html/pack.html
+const STEP1_MAX_PAGES = 4;     // حارس حلقة — ٢٥٠×٤ = ١٬٠٠٠ لكل استعلام، نفس سقف البيانات القديم بالحرف
+const STEP2_CHUNK     = 50;    // تمريرة ٢ — نفس `ORDER_FIELDS` الكامل، نفس الرقم المقاس آمن في v1.2.0
+const STEP2_MAX_IDS   = 3000;  // حارس دفاعي — لو المرشّحين (بعد فلتر العهدة) زادوا عن كده، نقتطع
+                                // ونعلن truncated بدل ما الـ Worker يعلّق في عشرات نداءات nodes(ids:)
 
 // 🔴 **أرضية تاريخ الأوردر — قرار أحمد 19-09-2026، ونفس القيمة في أداة
 //    المكتب بالحرف.** الطابور بيعرض الأوردرات اللي **اتعملت من 01-04-2026**
@@ -338,8 +358,18 @@ async function getAccessToken(env) {
 // أي فشل بيترمي: ① شبكة ② HTTP status ③ رد مش JSON ④ data.errors ⑤ data فاضية.
 // ⚠️ ④ هو الخطير: ميوتيشن بتترفض على مستوى الحقل بترجّع {"errors":[…],"data":null}
 //    و`userErrors` بتبقى `[]` — كود بيفحص `userErrors` بس بيقرا ده **نجاح**.
-let _lastThrottle = null;   // بيتعرض في diag — الاقتراب من السقف مابيبانش غير بانفجار دفعة
-async function shopifyGQL(env, token, query, variables = {}, opName = 'shopify') {
+// 🔴 **`_lastThrottle`/`_lastQueryCost` بيتحدّثوا من آخر نداء بس — مش من نداء
+//    `diag` نفسه.** لو `diag` اتنادى قبل أي استعلام تاني في نفس الـ isolate،
+//    القيمة بتفضل `null`. مش عطل — الـ isolate ممكن يتصفّر في أي وقت
+//    (Cloudflare)، فمفيش ضمان إن أي نداءين متتاليين واقعين على نفس الـ isolate.
+let _lastThrottle = null;    // بيتعرض في diag — الاقتراب من السقف مابيبانش غير بانفجار دفعة
+// 🟡 **إضافة v1.3.0 — قياس تكلفة الاستعلام الحقيقية لتجربة إعادة هيكلة §QUEUE.**
+//    `throttleStatus` بيقول الرصيد المتبقي، **مش** تكلفة النداء نفسه.
+//    `actualQueryCost` هو اللي بيتاكل من الرصيد فعليًا لكل نداء — وهو الرقم
+//    اللي المقارنة قبل/بعد التجربة مبنية عليه. التفاصيل الكاملة في
+//    `docs/query-cost-experiment.md` بريبو `Warehouse-Operations-Center`.
+let _lastQueryCost = null;   // { op, requested, actual } — آخر نداء بس، نفس تحفّظ _lastThrottle فوق
+async function shopifyGQL(env, token, query, variables = {}, opName = 'shopify', costLog = null) {
   const MAX_ATTEMPTS = 3;
   let lastErr = null;
 
@@ -382,7 +412,17 @@ async function shopifyGQL(env, token, query, variables = {}, opName = 'shopify')
     }
 
     if (!data.data) throw new Error(`${opName}: رد شوبيفاي بدون data — ${text.slice(0, 180)}`);
-    if (data.extensions?.cost?.throttleStatus) _lastThrottle = data.extensions.cost.throttleStatus;
+    // 🔴 **تلات قيم منفصلة في `extensions.cost` — مش رقم واحد:**
+    //    `requestedQueryCost` = السقف النظري قبل التنفيذ · `actualQueryCost` =
+    //    اللي اتاكل فعليًا من الرصيد بعد أي تقليم · `throttleStatus` = الرصيد
+    //    المتبقي بعده. أي قياس أو مقارنة لازم يكون على `actualQueryCost` —
+    //    هو الرقم الحقيقي، مش سقف نظري ومش رصيد متبقي.
+    if (data.extensions?.cost) {
+      const c = data.extensions.cost;
+      if (c.throttleStatus) _lastThrottle = c.throttleStatus;
+      _lastQueryCost = { op: opName, requested: c.requestedQueryCost ?? null, actual: c.actualQueryCost ?? null };
+      if (costLog) costLog.push({ op: opName, requested: c.requestedQueryCost ?? null, actual: c.actualQueryCost ?? null });
+    }
     return data;
   }
   throw lastErr || new Error(`${opName}: فشل غير معروف`);
@@ -411,21 +451,35 @@ function assertEnv(env, ...groups) {
 // §QUEUE — طابور «جاهز للرجوع للمخزن»
 // ══════════════════════════════════════════════════════════════
 //
-// 🔴 **الـ Worker بيستعلم عن الحالة بس — الفلترة في الواجهة** (نفس قرار أداة
-//    المكتب بالحرف). السبب حقيقي ومقيس: `custom.package_whereabouts_s1` **مش
-//    قابل للفلترة** في بحث شوبيفاي، والفلتر عليه **بيتجاهَل في صمت** ويرجّع
-//    **المتجر كله** (١٠٬٠٠٠ صف — مقيس 15-09-2026). يعني فلترة الأهلية على
-//    مستوى الاستعلام مستحيلة أصلاً.
+// 🔴 **`package_whereabouts_s1`/`_s2` لسه مش قابلين للفلترة في `query`** —
+//    مقاس (١٠٬٠٠٠ صف — 15-09-2026)، والفلتر عليهم بيتجاهَل في صمت ويرجّع
+//    المتجر كله. القيد ده **ما اتلغاش** — راجع `docs/query-cost-experiment.md`
+//    بريبو الهب لبند مفتوح عن تفعيل Filtering على تعريف الميتافيلد نفسه
+//    (مورد نادر: ٥ تعريفات بس لكل مورد على مستوى المتجر).
 //
-// ⚠️ **وعشان كده الرد بيرجّع الحقول الخام لكل أوردر** (زون · مندوب · حالتين ·
-//    وقتَي تغليف · عهدتَي الطرد · الإلغاء)، والواجهة بتحكم بيهم من **مصدر
-//    واحد** — `wocWarehouseGate` في `shared/shell.js` §WAREHOUSE-GATE. الصفحة
-//    والشاشة الرئيسية بينادوا **نفس الدالة** على **نفس الرد**، فمستحيل
-//    الرقمين يفترقوا (درس R1 — v1.11.0: الرئيسية قالت ٦٦ والصفحة فتحت على ٦).
+// 🔴 **من v1.3.0: فلترة العهدة بتحصل في الـ Worker — مش في الواجهة زي v1.2.0.**
+//    تمريرتين بدل واحدة (`§QUEUE::STEP1`/`STEP2` تحت): تمريرة رخيصة بتحدد
+//    المرشّحين (عهدة = `Office`، بنفس أولوية `wocWarehouseGate` بالحرف)،
+//    وتمريرة تانية بتجيب التفاصيل الكاملة **للمرشّحين بس**. السبب: v1.2.0
+//    كانت بتجيب كل الحقول التقيلة لكل أوردر مطابق للحالة **قبل** ما تعرف لو
+//    هيتستبعد بعدين، وده اللي سبّب `THROTTLED` فعلي على المتجر الحقيقي.
+// ⚠️ **والرد للواجهة زي ما هو بالظبط** (نفس `shapeOrder`، نفس المفاتيح) —
+//    صفر تغيير في العقد. `wocWarehouseGate`/`wocWarehouseQueue` في
+//    `shared/shell.js` §WAREHOUSE-GATE لسه **المصدر الوحيد** للأهلية في
+//    الواجهة، وبتتطبّق على الرد **زي ما هي** — الفرق الوحيد إن عدد الصفوف
+//    الراجعة بقى أقل، لأن اللي اتشال أصلاً كان هيترمى في `wocWarehouseQueue`
+//    (تحقّق: `warehouse-return.html` و`index.html` بيطبّقوا الفلترة **فورًا**
+//    على `data.orders` بلا أي استخدام تاني للمصفوفة الخام قبلها).
+// ⛔ **وممنوع الاستنتاج إن الفلترة اتنقلت بالكامل للـ Worker** — باقي شروط
+//    الأهلية (الزون · المندوب · الحالة · وقت التغليف بميتافيلد الماكينة
+//    الصح) **لسه بالكامل في `wocWarehouseGate`**، زي ما هي. الـ Worker بيفلتر
+//    بند واحد بس (العهدة) لأنه هو اللي بيقلّل حجم البيانات التقيلة المطلوب
+//    جلبها — مش لأنه "أدق" من الواجهة.
 //
 // 🔴 **بس الحارس الحقيقي على الكتابة في `?action=scan` تحت** — حارس في الواجهة
 //    بس **مش حارس** (`ecommoda-order-lifecycle` §1.5): تاب مفتوح من ساعة
-//    والأوردر اتغيّرت حالته في الوقت ده كان هيعدّي.
+//    والأوردر اتغيّرت حالته في الوقت ده كان هيعدّي. `scan` بيقرا الأوردر
+//    **حيًا** وقت الضغطة، بغض النظر عن أي فلترة حصلت في الطابور.
 
 // 🔴 **جزء الحقول واحد** — الطابور والسكان بيقروا **نفس** المجموعة بالحرف.
 //    بناء الاستعلام التاني بـ`.replace()` على نص الأول كان بيفشل **في صمت**
@@ -461,10 +515,28 @@ const ORDER_FIELDS = `
   w2:      metafield(namespace: "custom", key: "package_whereabouts_s2") { value }
 `;
 
-const QUEUE_QUERY = `
-query ReturnedOrders($q: String!, $after: String, $n: Int!) {
+// ─── §QUEUE::STEP1 — تمريرة رخيصة: هوية الأوردر + عهدة الطرد بس ───
+// 🔴 **السبب الوحيد لوجود التمريرة دي:** `package_whereabouts_s1`/`_s2` مش
+//    قابلين للفلترة في `query` — فمفيش طريقة نستبعد غير `Office` **في
+//    شوبيفاي نفسها**. التمريرة دي بتجيب أقل حقول ممكنة عشان نطبّق الاستبعاد
+//    ده **إحنا** بأرخص تكلفة ممكنة، قبل ما ندفع تكلفة باقي الحقول التقيلة
+//    (زون/مندوب/وقتَي تغليف) على أوردرات هتترمى أصلاً.
+// ⚠️ **`cancelledAt` مطلوب هنا — مش زينة.** `wocWarehouseGate` بتدّي أولوية
+//    S1 لو `cancelledAt` موجودة **حتى لو `status_2_r_e` هي اللي طابقت
+//    الاستعلام** — نفس المنطق منسوخ بالحرف في `mergeStep1` تحت.
+const STEP1_FIELDS = `
+  id
+  legacyResourceId
+  name
+  cancelledAt
+  w1: metafield(namespace: "custom", key: "package_whereabouts_s1") { value }
+  w2: metafield(namespace: "custom", key: "package_whereabouts_s2") { value }
+`;
+
+const STEP1_QUERY = `
+query WarehouseStep1($q: String!, $after: String, $n: Int!) {
   orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true, after: $after) {
-    nodes { ${ORDER_FIELDS} }
+    nodes { ${STEP1_FIELDS} }
     pageInfo { hasNextPage endCursor }
   }
 }`;
@@ -497,27 +569,78 @@ function shapeOrder(o) {
   };
 }
 
-async function fetchQueuePage(env, token, q) {
+async function fetchStep1Page(env, token, q, opName, costLog) {
   const out = [];
   let after = null, pages = 0, truncated = false;
-  while (pages < QUEUE_MAX_PAGES) {
-    const data = await shopifyGQL(env, token, QUEUE_QUERY,
-      { q, after, n: QUEUE_PAGE_SIZE }, 'returnedOrders');
+  while (pages < STEP1_MAX_PAGES) {
+    const data = await shopifyGQL(env, token, STEP1_QUERY,
+      { q, after, n: STEP1_PAGE_SIZE }, opName, costLog);
     const conn = data.data?.orders;
-    if (!conn) throw new Error('returnedOrders: رد شوبيفاي بلا `orders`');
+    if (!conn) throw new Error(`${opName}: رد شوبيفاي بلا \`orders\``);
     out.push(...(conn.nodes || []));
     pages++;
     if (!conn.pageInfo?.hasNextPage) { after = null; break; }
     after = conn.pageInfo.endCursor;
-    if (pages >= QUEUE_MAX_PAGES) truncated = true;
+    if (pages >= STEP1_MAX_PAGES) truncated = true;
   }
   return { nodes: out, truncated };
+}
+
+// ─── §QUEUE::STEP2 — التفاصيل الكاملة، للمرشّحين بس (بعد فلتر العهدة) ───
+const STEP2_QUERY = `
+query WarehouseStep2($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Order { ${ORDER_FIELDS} }
+  }
+}`;
+
+async function fetchStep2Batch(env, token, gids, costLog) {
+  const out = [];
+  for (let i = 0; i < gids.length; i += STEP2_CHUNK) {
+    const chunk = gids.slice(i, i + STEP2_CHUNK);
+    const data = await shopifyGQL(env, token, STEP2_QUERY, { ids: chunk }, 'warehouseStep2', costLog);
+    for (const n of (data.data?.nodes || [])) if (n) out.push(n);
+  }
+  return out;
+}
+
+// ─── §QUEUE::mergeStep1 — أولوية الماكينة، منسوخة بالحرف من `wocWarehouseGate` ───
+// 🔴 **الأولوية: S1 الأول (لو الحالة طابقت أو `cancelledAt` موجودة)، وإلا S2.**
+//    نفس ترتيب `shared/shell.js §WAREHOUSE-GATE` سطر بسطر — أي اختلاف هنا
+//    بيخلّي أوردر يتفحص بميتافيلد غلط (`w2` بدل `w1` مثلًا) ويترفض أو يتقبل
+//    غلط **بلا أي خطأ في الكونسول**.
+//    ① أوردرات `s1Nodes` (`manual_status` طابق فعليًا — Returned أو Cancelled)
+//       — S1 مؤكَّد، فحص `w1`.
+//    ② أوردرات `s2OnlyNodes` (`status_2_r_e` طابق و`manual_status` ما طابقش)
+//       — لو `cancelledAt` موجودة: S1 برضه بيغلب (فحص `w1`)، بالظبط زي
+//       `wocWarehouseGate` (`s1Eligible = ... || !!o.cancelledAt`). غير كده: S2
+//       (فحص `w2`).
+// ⚠️ **التكرار بين الاستعلامات مش خطأ** — أوردر ممكن يطابق `manual_status`
+//    و`status_2_r_e` مع بعض (طرد S1 ملغي وطرد S2 راجع على نفس الأوردر). لو
+//    اتحسم في المسار S1 (خطوة ①)، خطوة ② بتتخطّاه (`candidates.has(id)`).
+function mergeStep1(s1Nodes, s2OnlyNodes) {
+  const candidates = new Map();   // orderId → { node, machine }
+  for (const n of s1Nodes) {
+    const id = n.legacyResourceId;
+    if (id && !candidates.has(id)) candidates.set(id, { node: n, machine: 's1' });
+  }
+  for (const n of s2OnlyNodes) {
+    const id = n.legacyResourceId;
+    if (!id || candidates.has(id)) continue;   // اتحسم في المسار S1 خلاص
+    candidates.set(id, { node: n, machine: n.cancelledAt ? 's1' : 's2' });
+  }
+  const survivors = [];
+  for (const { node, machine } of candidates.values()) {
+    const wa = machine === 's1' ? node.w1?.value : node.w2?.value;
+    if (wa === WA_VALUES.OFFICE) survivors.push(node.id);   // GID — جاهز لـ nodes(ids:)
+  }
+  return survivors;
 }
 
 // ─── §QUEUE::handleReadyQueue ───
 // بيجيب **تلات استعلامات**: `manual_status = Returned` · `manual_status =
 // Cancelled` · `status_2_r_e = Returned`. أوردر ممكن يكون في أكتر من واحد —
-// بيتدمج بالـ id، والواجهة هي اللي بتقرر الماكينة.
+// بيتدمج بالـ id (`mergeStep1` فوق).
 //
 // ⚠️ **والتلاتة عليهم أرضية `created_at >= ORDERS_SINCE`** — فوق في
 //    §CONSTANTS. أرضية **ثابتة** مش نافذة متحرّكة بقرار.
@@ -528,34 +651,74 @@ async function fetchQueuePage(env, token, q) {
 //    ⚠️ **والأوردر ده بيتسكن عادي** — `evaluate` تحت بتقبل `cancelledAt`
 //       صراحةً. يعني هو **مش في القايمة بس السكانة بتشتغل عليه** — وده
 //       بالظبط معنى «القايمة عرض والـ Worker مرجع».
+//
+// 🔴 **من v1.3.0: تمريرتين مش واحدة (تجربة — `docs/query-cost-experiment.md`
+//    بريبو الهب).** تمريرة ١ رخيصة بتحدد المرشّحين (فلتر العهدة `Office`
+//    بيتطبّق **هنا** بنفس أولوية `wocWarehouseGate` — `mergeStep1` فوق)،
+//    وتمريرة ٢ بتجيب التفاصيل الكاملة **للمرشّحين بس** عبر `nodes(ids:)`.
+// ⚠️ **الرد للواجهة زي ما هو بالظبط** (نفس شكل `shapeOrder`، نفس المفاتيح) —
+//    صفر تغيير في العقد. الفرق الوحيد: عدد الصفوف الراجعة أقل من v1.2.0، لأن
+//    الواجهة كانت هترميها في `wocWarehouseQueue` أصلاً (صفر أثر على الشاشة).
+// ⚠️ **`queryCost` حقل تجريبي جديد في الرد** — للقياس بس، الواجهة مش محتاجة
+//    تقراه ومفيش أي اعتماد عليه. لو التجربة اتلغت، الحقل ده بيتشال بلا أي أثر.
 async function handleReadyQueue(env, request) {
   assertEnv(env, 'shopify');
   const token = await getAccessToken(env);
+  const costLog = [];
 
   // ⚠️ الأرضية بتتحط على **التلات استعلامات** — واحد من غيرها معناه إن حالة
   //    بتعرض أقدم من التانيتين، والجدول بيخلط النطاقين بلا أي إشارة.
   const floor = ` AND created_at:>=${ORDERS_SINCE}`;
 
-  const parts = await Promise.all([
-    fetchQueuePage(env, token, `metafields.custom.manual_status:'${S1_STATUS.RETURNED}'${floor}`),
-    fetchQueuePage(env, token, `metafields.custom.manual_status:'${S1_STATUS.CANCELLED}'${floor}`),
-    fetchQueuePage(env, token, `metafields.custom.status_2_r_e:'${S2_STATUS.RETURNED}'${floor}`),
+  const [s1Returned, s1Cancelled, s2Returned] = await Promise.all([
+    fetchStep1Page(env, token, `metafields.custom.manual_status:'${S1_STATUS.RETURNED}'${floor}`,
+                   'warehouseStep1_s1Returned', costLog),
+    fetchStep1Page(env, token, `metafields.custom.manual_status:'${S1_STATUS.CANCELLED}'${floor}`,
+                   'warehouseStep1_s1Cancelled', costLog),
+    fetchStep1Page(env, token, `metafields.custom.status_2_r_e:'${S2_STATUS.RETURNED}'${floor}`,
+                   'warehouseStep1_s2Returned', costLog),
   ]);
 
+  const candidateGids = mergeStep1([...s1Returned.nodes, ...s1Cancelled.nodes], s2Returned.nodes);
+  const step1Truncated = s1Returned.truncated || s1Cancelled.truncated || s2Returned.truncated;
+
+  // 🔴 حارس دفاعي — لو المرشّحين (بعد فلتر العهدة) زادوا عن السقف، نقتطع
+  //    ونعلن الاقتطاع، بدل ما الـ Worker يعلّق في عشرات نداءات nodes(ids:).
+  //    مش متوقّع عمليًا (الفلترة المفروض تقلّل العدد بمراحل)، بس §CONSTANTS::caps
+  //    مبدأ عام: مفيش حلقة من غير سقف.
+  const ids = candidateGids.slice(0, STEP2_MAX_IDS);
+  const step2Truncated = candidateGids.length > STEP2_MAX_IDS;
+
+  const detailNodes = ids.length ? await fetchStep2Batch(env, token, ids, costLog) : [];
+
   const byId = new Map();
-  for (const p of parts) for (const n of p.nodes) {
+  for (const n of detailNodes) {
     const s = shapeOrder(n);
     if (s.orderId) byId.set(s.orderId, s);
   }
 
+  const step1Cost = costLog.filter(c => c.op.startsWith('warehouseStep1')).reduce((s, c) => s + (c.actual || 0), 0);
+  const step2Cost = costLog.filter(c => c.op === 'warehouseStep2').reduce((s, c) => s + (c.actual || 0), 0);
+
   return json({
     ok: true,
     orders: [...byId.values()],
-    truncated: parts.some(p => p.truncated),
+    truncated: step1Truncated || step2Truncated,
     // 🔴 الأرضية بترجع في الرد عشان **الواجهة تعرضها من هنا** — مش مكتوبة
     //    بالإيد هناك. رقمان يفترقوا في صمت هو درس R1 بالحرف.
     ordersSince: ORDERS_SINCE,
     fetchedAt: new Date().toISOString(),
+    // 🟡 تجريبي — راجع docs/query-cost-experiment.md بريبو الهب. مفيش أي
+    //    اعتماد من الواجهة عليه، وحذفه بلا أي أثر.
+    queryCost: {
+      step1Calls:          costLog.filter(c => c.op.startsWith('warehouseStep1')).length,
+      step1ActualTotal:    step1Cost,
+      step2Calls:          costLog.filter(c => c.op === 'warehouseStep2').length,
+      step2ActualTotal:    step2Cost,
+      totalActual:         step1Cost + step2Cost,
+      candidatesAfterStep1: candidateGids.length,
+      detailsFetched:       detailNodes.length,
+    },
   }, 200, request);
 }
 
@@ -920,13 +1083,22 @@ async function handleDiag(env, request) {
   }
 
   // ④ تكلفة الاستعلام — الاقتراب من السقف مابيبانش غير بانفجار دفعة كاملة
-  push(true, 'تكلفة استعلام شوبيفاي', _lastThrottle
+  // ⚠️ القيمتان دول من **آخر نداء GraphQL حصل في الـ isolate ده** — ممكن
+  //    يكونوا من `diag` نفسه (لو نادى شوبيفاي) أو من نداء سابق. مش لقطة
+  //    لحظية دقيقة، بس بتدّي إحساس عام بالوضع.
+  push(true, 'رصيد تكلفة الاستعلام (throttleStatus)', _lastThrottle
     ? `currentlyAvailable=${_lastThrottle.currentlyAvailable} / ${_lastThrottle.maximumAvailable} · restoreRate=${_lastThrottle.restoreRate}/s`
+    : 'لسه مفيش استعلام في الاستدعاء ده');
+  // 🟡 تجريبي (v1.3.0) — `actualQueryCost` تكلفة آخر نداء فعليًا، مش الرصيد
+  //    المتبقي. للقياس بتاع docs/query-cost-experiment.md بريبو الهب.
+  push(true, 'تكلفة آخر نداء (actualQueryCost)', _lastQueryCost
+    ? `${_lastQueryCost.op}: requested=${_lastQueryCost.requested} · actual=${_lastQueryCost.actual}`
     : 'لسه مفيش استعلام في الاستدعاء ده');
 
   // ⑤ أرضية تاريخ الأوردر — معلومة، مش نجاح ولا فشل
   push(true, 'أرضية تاريخ الأوردر', `الطابور بيعرض أوردرات من ${ORDERS_SINCE} فأحدث · `
-    + `سقف ${QUEUE_PAGE_SIZE * QUEUE_MAX_PAGES} أوردر لكل استعلام`,
+    + `سقف تمريرة ١: ${STEP1_PAGE_SIZE * STEP1_MAX_PAGES} أوردر لكل استعلام (حقول خفيفة) · `
+    + `سقف تمريرة ٢: ${STEP2_MAX_IDS} مرشّح (حقول كاملة)`,
     'الأرضية عرض بس — الأوردر الأقدم منها بيتسكن عادي والـ Worker بيكتب عليه');
 
   // ⑥ الأصل
