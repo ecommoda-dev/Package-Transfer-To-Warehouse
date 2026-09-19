@@ -45,7 +45,7 @@
 GET  ?action=get_config              نسخة الـ Worker
 GET  ?action=diag                    فحص ذاتي بلا كتابة (بيقرا تعريف الميتافيلد الحيّ)
 GET  ?action=get_employees           فلتر الموظف في تاب السجل
-GET  ?action=get_ready_to_warehouse  المرتجع/الملغي في آخر ٣٠ يوم بحقوله الخام
+GET  ?action=get_ready_to_warehouse  المرتجع/الملغي من 2026-04-01 فأحدث بحقوله الخام
 POST ?action=scan                    قراءة حيّة + حكم + metafieldsSet + صف D1
 GET  ?action=get_logs[_count|_export]
 ```

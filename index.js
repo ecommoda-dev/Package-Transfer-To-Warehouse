@@ -102,17 +102,30 @@ const COURIER_BOSTA = 'Bosta';
 const QUEUE_PAGE_SIZE = 50;
 const QUEUE_MAX_PAGES = 6;          // حارس حلقة — 300 أوردر لكل استعلام
 
-// 🔴 **نافذة زمنية على الطابور — وهي الفرق التاني الكبير عن أداة المكتب.**
-//    هناك المصدر `manual_status:'Ready'`، وهي حالة **عابرة** فعددها عشرات.
-//    هنا المصدر `Returned`/`Cancelled`، وهما حالتان **نهائيتان بتتراكم**:
-//    كل مرتجع وكل ملغي في تاريخ المتجر كله بيطابق الفلتر. من غير النافذة دي
-//    الاستعلام بيرجّع آلاف الصفوف، والـ 300 اللي بتعدّي الحارس بتبقى
-//    **أقدم حاجة** أو أحدث حاجة حسب الترتيب — يعني الطابور يقول رقم مالوش
-//    أي علاقة بالطرود اللي في إيد الموظف دلوقتي.
-// ⚠️ **والنافذة عرض بس — مش شرط أهلية.** أوردر أقدم من النافذة **بيتسكن
-//    عادي** والـ Worker بيكتب عليه؛ هو مش ظاهر في القايمة وبس. الحارس
-//    الحقيقي في `?action=scan`، والقايمة لقطة.
-const QUEUE_WINDOW_DAYS = 30;
+// 🔴 **أرضية تاريخ الأوردر — قرار أحمد 19-09-2026، ونفس القيمة في أداة
+//    المكتب بالحرف.** الطابور بيعرض الأوردرات اللي **اتعملت من 01-04-2026**
+//    فأحدث.
+//    ⚠️ **والحاجة دي ألزم هنا منها في المكتب:** هناك المصدر
+//    `manual_status:'Ready'` وهي حالة **عابرة** فعددها عشرات؛ هنا المصدر
+//    `Returned` و`Cancelled`، وهما حالتان **نهائيتان بتتراكم** — كل مرتجع
+//    وكل ملغي في تاريخ المتجر كله بيطابق الفلتر. من غير الأرضية الاستعلام
+//    بيرجّع آلاف الصفوف، والـ 300 اللي بتعدّي حارس الحلقة بتبقى أحدث حاجة
+//    أو أقدم حاجة حسب الترتيب — يعني رقم مالوش أي علاقة بالطرود اللي في إيد
+//    الموظف.
+// 🔴 **وهي أرضية ثابتة مش نافذة متحرّكة — والقرار ده اترجع فيه صراحةً.**
+//    النسخة الأولى كانت `updated_at` بآخر ٣٠ يوم، و**اتشالت بقرار أحمد**:
+//    النافذة المتحرّكة بتخفي الطرد الراجع من شهرين **بالظبط لما يبقى منسي
+//    فعلاً**، وهو الطرد اللي الأداة دي (شبكة الأمان) اتعملت عشانه.
+//    ⛔ ممنوع الرجوع لـ«آخر N يوم».
+// ⚠️ **والفلتر على `created_at` مش `updated_at`** — تاريخ **الأوردر** هو
+//    اللي الموظف بيقراه في الجدول؛ و`updated_at` بيتحرّك مع أي تعديل (حتى
+//    كتابة الميتافيلد بتاعتنا)، فكان بيدّي أرضية بتتزحلق تحت الطرد نفسه.
+// ⚠️ **والصيغة `YYYY-MM-DD` بتتقرا UTC عند شوبيفاي** — يوم فرق على أرضية
+//    ثابتة مالوش أثر عملي، فمفيش تحويل توقيت هنا عن قصد.
+// 🔴 **وهي أرضية عرض — مش شرط أهلية.** الأوردر الأقدم منها **بيتسكن عادي**
+//    والـ Worker بيكتب عليه؛ هو مش في القايمة وبس. ⛔ ممنوع تتحط في
+//    `evaluate`.
+const ORDERS_SINCE = '2026-04-01';
 const SHOPIFY_API_VERSION = '2026-01';
 // ══════════════════════════════════════════════════════════════
 // §CORS — Option B (الأداة بتكتب على شوبيفاي)
@@ -488,20 +501,13 @@ async function fetchQueuePage(env, token, q) {
   return { nodes: out, truncated };
 }
 
-// ─── §QUEUE::windowFilter — النافذة الزمنية ───
-// ⚠️ التاريخ **بيتحسب** مايتكتبش ثابت، وبتوقيت القاهرة زي باقي الستاك
-//    (`ecommoda-constants` §13). يوم زيادة أرخص بكتير من يوم ناقص: الناقص
-//    بيخفي طرد راجع النهاردة الصبح.
-function windowFrom(days = QUEUE_WINDOW_DAYS) {
-  const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const p = cairoParts(d);
-  return `${p.year}-${p.month}-${p.day}`;
-}
-
 // ─── §QUEUE::handleReadyQueue ───
 // بيجيب **تلات استعلامات**: `manual_status = Returned` · `manual_status =
 // Cancelled` · `status_2_r_e = Returned`. أوردر ممكن يكون في أكتر من واحد —
 // بيتدمج بالـ id، والواجهة هي اللي بتقرر الماكينة.
+//
+// ⚠️ **والتلاتة عليهم أرضية `created_at >= ORDERS_SINCE`** — فوق في
+//    §CONSTANTS. أرضية **ثابتة** مش نافذة متحرّكة بقرار.
 //
 // 🔴 **وفيه حالة مقصودة مش في الاستعلامات دي: الملغي على شوبيفاي نفسها**
 //    (`cancelledAt` من غير `manual_status = Cancelled`). فلتر `status:cancelled`
@@ -513,13 +519,14 @@ async function handleReadyQueue(env, request) {
   assertEnv(env, 'shopify');
   const token = await getAccessToken(env);
 
-  const since = windowFrom();
-  const win   = ` AND updated_at:>=${since}`;
+  // ⚠️ الأرضية بتتحط على **التلات استعلامات** — واحد من غيرها معناه إن حالة
+  //    بتعرض أقدم من التانيتين، والجدول بيخلط النطاقين بلا أي إشارة.
+  const floor = ` AND created_at:>=${ORDERS_SINCE}`;
 
   const parts = await Promise.all([
-    fetchQueuePage(env, token, `metafields.custom.manual_status:'${S1_STATUS.RETURNED}'${win}`),
-    fetchQueuePage(env, token, `metafields.custom.manual_status:'${S1_STATUS.CANCELLED}'${win}`),
-    fetchQueuePage(env, token, `metafields.custom.status_2_r_e:'${S2_STATUS.RETURNED}'${win}`),
+    fetchQueuePage(env, token, `metafields.custom.manual_status:'${S1_STATUS.RETURNED}'${floor}`),
+    fetchQueuePage(env, token, `metafields.custom.manual_status:'${S1_STATUS.CANCELLED}'${floor}`),
+    fetchQueuePage(env, token, `metafields.custom.status_2_r_e:'${S2_STATUS.RETURNED}'${floor}`),
   ]);
 
   const byId = new Map();
@@ -532,8 +539,9 @@ async function handleReadyQueue(env, request) {
     ok: true,
     orders: [...byId.values()],
     truncated: parts.some(p => p.truncated),
-    windowDays: QUEUE_WINDOW_DAYS,
-    windowFrom: since,
+    // 🔴 الأرضية بترجع في الرد عشان **الواجهة تعرضها من هنا** — مش مكتوبة
+    //    بالإيد هناك. رقمان يفترقوا في صمت هو درس R1 بالحرف.
+    ordersSince: ORDERS_SINCE,
     fetchedAt: new Date().toISOString(),
   }, 200, request);
 }
@@ -903,10 +911,10 @@ async function handleDiag(env, request) {
     ? `currentlyAvailable=${_lastThrottle.currentlyAvailable} / ${_lastThrottle.maximumAvailable} · restoreRate=${_lastThrottle.restoreRate}/s`
     : 'لسه مفيش استعلام في الاستدعاء ده');
 
-  // ⑤ نافذة الطابور — معلومة، مش نجاح ولا فشل
-  push(true, 'نافذة الطابور', `آخر ${QUEUE_WINDOW_DAYS} يوم (من ${windowFrom()}) · `
+  // ⑤ أرضية تاريخ الأوردر — معلومة، مش نجاح ولا فشل
+  push(true, 'أرضية تاريخ الأوردر', `الطابور بيعرض أوردرات من ${ORDERS_SINCE} فأحدث · `
     + `سقف ${QUEUE_PAGE_SIZE * QUEUE_MAX_PAGES} أوردر لكل استعلام`,
-    'النافذة عرض بس — الأوردر الأقدم منها بيتسكن عادي والـ Worker بيكتب عليه');
+    'الأرضية عرض بس — الأوردر الأقدم منها بيتسكن عادي والـ Worker بيكتب عليه');
 
   // ⑥ الأصل
   const origin = request.headers.get('Origin') || '(بلا Origin)';
