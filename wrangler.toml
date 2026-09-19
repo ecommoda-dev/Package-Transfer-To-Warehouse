@@ -1,0 +1,37 @@
+name               = "package-transfer-to-warehouse-worker"
+main               = "index.js"
+compatibility_date = "2025-01-01"
+workers_dev        = true
+
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding       = "DB"
+database_name = "ecommoda-dev-logs"
+database_id   = "90db62d3-bd7e-4d92-912b-10fc78eeb565"
+
+[vars]
+SHOP_DOMAIN = "6c7e1a-53.myshopify.com"
+
+# ─────────────────────────────────────────────────────────────
+# [vars] والنشر
+# ─────────────────────────────────────────────────────────────
+# الأداة دي بتتنشر من git عبر Workers Builds، يعني الـ [vars] فوق **بتتطبّق
+# فعلاً** مع كل push.
+# ⚠️ ممنوع تضيف SHOP_DOMAIN بإيدك في الداشبورد — أول push بيدهس القيمة اليدوية
+#    (واقعة موثّقة: PRICE_DIFFERENCE في stylebox-price-sync-worker · 12-09-2026).
+# لو SHOP_DOMAIN ضاعت: كل نداء شوبيفاي بيرجّع «"error code: 1003" is not valid JSON».
+# ─────────────────────────────────────────────────────────────
+# الأسرار — Dashboard → Settings → Variables → علّم "Secret"
+# ممنوع تتكتب في الريبو. اكتب الأسماء، متلزقش القيم.
+# ⚠️ بعد إضافة أي سر → Deployments → Version History → ⋯ → **Promote**
+#    من غير Promote القيمة بتفضل undefined → كل نداء Unauthorized.
+# ─────────────────────────────────────────────────────────────
+# WORKER_SECRET   ← 🔴 **قيمة مجموعة `warehouse_ops`** — مش قيمة فريدة للأداة دي.
+#                    الهب بيبعت سر واحد لكل الـ Workers من مفتاح localStorage
+#                    واحد (Standards #39). قيمة مختلفة = 401 على كل نداء.
+# CLIENT_ID       ← Shopify OAuth
+# CLIENT_SECRET   ← Shopify OAuth
+# ─────────────────────────────────────────────────────────────
