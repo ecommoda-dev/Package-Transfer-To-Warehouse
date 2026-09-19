@@ -33,7 +33,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.3.0';
+const WORKER_VERSION = '1.3.1';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -129,7 +129,20 @@ const COURIER_BOSTA = 'Bosta';
 //    سقف ٥ تعريفات فلترة بس لكل مورد على مستوى المتجر كله. بند مفتوح منفصل
 //    في `docs/query-cost-experiment.md`.)
 const STEP1_PAGE_SIZE = 250;   // تمريرة ١ — ٦ حقول بس، نفس رتبة تكلفة print.html/pack.html
-const STEP1_MAX_PAGES = 4;     // حارس حلقة — ٢٥٠×٤ = ١٬٠٠٠ لكل استعلام، نفس سقف البيانات القديم بالحرف
+// 🔴 **`STEP1_MAX_PAGES` اترفع من ٤ لـ٢٠ بعد قياس حي (19-09-2026).** أول نشر
+//    لـ`1.3.0` رجّع `truncated: true` فعليًا — `step1Calls: 11` بتكلفة
+//    `step1ActualTotal: 354` بس (~٣٢ نقطة/نداء). يعني عدد الأوردرات المطابقة
+//    (`Returned`/`Cancelled` من ٢٠٢٦-٠٤-٠١) على واحد على الأقل من التلات
+//    استعلامات **تعدّى ١٬٠٠٠**، بينما التكلفة الفعلية للصفحة رخيصة جدًا
+//    (بعيدة عن ٧٠٠). فالسقف اترفع لنفس رقم `QUEUE_MAX_PAGES` القديم (`٢٠`) —
+//    رقم **مُختبَر فعلاً** على نفس الاستعلامات دي في تصميم `1.2.0` الأتقل
+//    بمراحل (١١ ميتافيلد للنود بدل ٢)، فتطبيقه هنا على استعلام أخف **أأمن**
+//    منه هناك، مش أخطر.
+// ⚠️ **`queryCost.step1Detail`** (تحت في `handleReadyQueue`) بيقول لكل
+//    استعلام من التلاتة كام صفحة استخدم واتقصّ ولا لأ — لو `truncated: true`
+//    رجعت تاني بعد الرفع ده، الرقم ده هو اللي هيقول أنهي استعلام بالظبط
+//    محتاج سقف أعلى، بدل تخمين تاني.
+const STEP1_MAX_PAGES = 20;    // حارس حلقة — ٢٥٠×٢٠ = ٥٬٠٠٠ لكل استعلام
 const STEP2_CHUNK     = 50;    // تمريرة ٢ — نفس `ORDER_FIELDS` الكامل، نفس الرقم المقاس آمن في v1.2.0
 const STEP2_MAX_IDS   = 3000;  // حارس دفاعي — لو المرشّحين (بعد فلتر العهدة) زادوا عن كده، نقتطع
                                 // ونعلن truncated بدل ما الـ Worker يعلّق في عشرات نداءات nodes(ids:)
@@ -583,7 +596,7 @@ async function fetchStep1Page(env, token, q, opName, costLog) {
     after = conn.pageInfo.endCursor;
     if (pages >= STEP1_MAX_PAGES) truncated = true;
   }
-  return { nodes: out, truncated };
+  return { nodes: out, truncated, pages, op: opName };
 }
 
 // ─── §QUEUE::STEP2 — التفاصيل الكاملة، للمرشّحين بس (بعد فلتر العهدة) ───
@@ -682,6 +695,13 @@ async function handleReadyQueue(env, request) {
   const candidateGids = mergeStep1([...s1Returned.nodes, ...s1Cancelled.nodes], s2Returned.nodes);
   const step1Truncated = s1Returned.truncated || s1Cancelled.truncated || s2Returned.truncated;
 
+  // 🟡 تفصيل لكل استعلام لوحده — بدون ده `step1Calls` رقم مجمّع بس ومش
+  //    بيقول أنهي استعلام من التلاتة هو اللي وصل لسقف الصفحات. أُضيف بعد
+  //    ما `truncated: true` ظهر فعليًا على `1.3.0` ومكناش عارفين مين السبب.
+  const step1Detail = [s1Returned, s1Cancelled, s2Returned].map(r => (
+    { op: r.op, pages: r.pages, truncated: r.truncated }
+  ));
+
   // 🔴 حارس دفاعي — لو المرشّحين (بعد فلتر العهدة) زادوا عن السقف، نقتطع
   //    ونعلن الاقتطاع، بدل ما الـ Worker يعلّق في عشرات نداءات nodes(ids:).
   //    مش متوقّع عمليًا (الفلترة المفروض تقلّل العدد بمراحل)، بس §CONSTANTS::caps
@@ -718,6 +738,7 @@ async function handleReadyQueue(env, request) {
       totalActual:         step1Cost + step2Cost,
       candidatesAfterStep1: candidateGids.length,
       detailsFetched:       detailNodes.length,
+      step1Detail,          // [{ op, pages, truncated }, …] — لكل استعلام لوحده
     },
   }, 200, request);
 }
