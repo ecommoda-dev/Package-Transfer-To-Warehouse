@@ -33,7 +33,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.0.0';
+const WORKER_VERSION = '1.1.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -418,18 +418,20 @@ function assertEnv(env, ...groups) {
 // 🔴 **جزء الحقول واحد** — الطابور والسكان بيقروا **نفس** المجموعة بالحرف.
 //    بناء الاستعلام التاني بـ`.replace()` على نص الأول كان بيفشل **في صمت**
 //    لو مسافة اتغيّرت، فالحقول بتتعرّف مرة واحدة هنا وبتتركّب في التلاتة.
-// ⚠️ `updatedAt` **زيادة عن أداة المكتب** — هناك الترتيب بوقت التغليف (الطرد
-//    اللي قاعد من الصبح ينتقل الأول). هنا التغليف ممكن يكون من شهر والرجوع
-//    من ساعة، فوقت التغليف **مابيقولش حاجة عن الانتظار**. آخر تحديث هو أقرب
-//    أثر لتحوّل الحالة لـ`Returned`/`Cancelled`.
-//    ⚠️ وهو **تقريب مش تسجيل** — أي تعديل تاني على الأوردر بيحرّكه. الواجهة
-//       بتسمّي العمود «آخر تحديث» بالحرف عشان مايتقريش «وقت الرجوع».
+// 🔴 **`updatedAt` مش موجود هنا عن قصد — واتشال بقرار أحمد 19-09-2026.**
+//    كان بيتجاب وبيتعرض في عمودين («آخر تحديث» · «الوقت منذ آخر تحديث»)،
+//    و**كان تقريب مش تسجيل**: شوبيفاي مالهاش حقل بيقول «الطرد رجع إمتى»،
+//    و`updatedAt` بيتحرّك مع **أي** تعديل — تاج · تعديل بند · وحتى كتابة
+//    الميتافيلد بتاعتنا إحنا. النتيجة الواقعية إن عملية جماعية واحدة كانت
+//    بتخلّي صفوف كتير تقول نفس التاريخ بالظبط، فالعمود بيتقري **سجل رجوع**
+//    وهو مش كده.
+//    ⛔ ممنوع يترجع كحقل ولا كعمود إلا لما يبقى فيه **تسجيل حقيقي** لوقت
+//       الرجوع (ميتافيلد بتكتبه الأداة دي نفسها وقت السكانة مثلاً).
 const ORDER_FIELDS = `
   id
   legacyResourceId
   name
   createdAt
-  updatedAt
   cancelledAt
   displayFulfillmentStatus
   currentSubtotalLineItemsQuantity
@@ -449,7 +451,7 @@ const ORDER_FIELDS = `
 
 const QUEUE_QUERY = `
 query ReturnedOrders($q: String!, $after: String, $n: Int!) {
-  orders(first: $n, query: $q, sortKey: UPDATED_AT, reverse: true, after: $after) {
+  orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true, after: $after) {
     nodes { ${ORDER_FIELDS} }
     pageInfo { hasNextPage endCursor }
   }
@@ -465,7 +467,6 @@ function shapeOrder(o) {
     orderGid:  o.id,
     orderName: o.name,
     createdAt: o.createdAt,
-    updatedAt: o.updatedAt || null,
     cancelledAt: o.cancelledAt || null,
     fulfillment: o.displayFulfillmentStatus || null,
     customer:  o.shippingAddress?.name || null,

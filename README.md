@@ -2,7 +2,7 @@
 
 # قسم استلام المرتجعات — Package Transfer To Warehouse
 
-![worker](https://img.shields.io/badge/worker-v1.0.0-blue)
+![worker](https://img.shields.io/badge/worker-v1.1.0-blue)
 
 **Worker بس — مفيش واجهة في الريبو ده.**
 
