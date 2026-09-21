@@ -1,0 +1,19 @@
+{
+  "tool": "metafields_change",
+  "since": null,
+  "types": {
+    "rejected": {
+      "result": [
+        "rejected",
+        null
+      ],
+      "stage": "lookup",
+      "desc": "نقل الشحنة للمخزن اترفض — حالة مش صالحة أو انتقال ممنوع"
+    },
+    "update": {
+      "result": null,
+      "stage": "write",
+      "desc": "تحديث ميتافيلد عهدة الشحنة (package_whereabouts) → المخزن"
+    }
+  }
+}
