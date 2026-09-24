@@ -519,13 +519,13 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 | المهارة | الإصدار وقت آخر تعديل |
 |---|---|
-| ecommoda-worker-builder | **v3.3.0** |
-| ecommoda-constants | **v2.6.0** |
+| ecommoda-worker-builder | **v3.7.0** |
+| ecommoda-constants | **v3.1.0** |
 | ecommoda-order-lifecycle | **v1.8.0** |
 | shopify-graphql-helper | **v1.1.0** |
 | ecommoda-html-builder | **v6.6.0** |
 
-آخر مطابقة: 19-09-2026 · الـ Worker `1.4.0`
+آخر مطابقة: 24-09-2026 · الـ Worker `1.4.1`
 🔴 معلّقة: **إنشاء الـ Worker + ربط Builds + `WORKER_SECRET` (سر `warehouse_ops`)
 + `CLIENT_ID`/`CLIENT_SECRET` → Promote** · **تسجيل الأداة ككاتب جديد على
 `metafields_change` في `ecommoda-constants` §7 (بقيمة `extra.sourceTool`)** ·
@@ -534,7 +534,19 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 19-09-2026 — `1.4.0` (🔴 **§٨+§٩ من `docs/query-cost-experiment.md`
+آخر تحديث: 24-09-2026 — `1.4.1` (🔴 **الحارس الديناميكي لقيم اللوج (الطبقة ٥
+· `ecommoda-worker-builder` Step 7-ج).** `check-log-values.mjs` اتستبدل
+بنسخة مصلَّحة بتمسك `{ tool, type }` object shorthand كمان (مش `type:` بنقطتين
+بس) — التشيك القديم كان بيعدّي عليه في صمت. القياس على الكود الحالي: صفر
+قيم ديناميكية وصفر قيم ناقصة، `log-values.json` مطابق للكود ١٠٠٪
+(`update` · `rejected`). `LOG_REGISTRY` (`§LOG-REG` في `index.js`) اتبنى
+من نفس الملف، ومفتاحه الزوج `(tool, type)`. الحارس اتحط جوّه `writeLog`
+نفسها (الأنكور الوحيد في الريبو ده — مفيش `writeLogsBatch`): قيمة غير
+مسجّلة بتتكتب عادي + `extra._unregistered = true` + UPSERT صامت في
+`log_value_alerts`. **مفيش رفض كتابة أبدًا.** صفر تغيير في المنطق
+التشغيلي أو شكل `log-values.json` — مراقبة بس)
+
+19-09-2026 — `1.4.0` (🔴 **§٨+§٩ من `docs/query-cost-experiment.md`
 — قرار أحمد النهائي.** §٨②: `getAccessToken()` بقت بنفس انضباط `shopifyGQL`
 (retry + backoff ٣ محاولات) — تصحيح عام للخمس Workers المشتركة في نفس الـ
 Custom App، مش خاص بالأداة دي. §٩: `STEP1_MAX_PAGES` اترفع من `٤٠` لـ**`١٠٠`**
