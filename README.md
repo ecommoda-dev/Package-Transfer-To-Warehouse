@@ -10,8 +10,8 @@
 الملغي، والـ Worker بيكتب `custom.package_whereabouts_s1` (أو `_s2` لدورة
 الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 
-🔗 **الواجهة:** https://ecommoda-dev.github.io/Warehouse-Operations-Center/warehouse-return.html
-(صفحة `warehouse-return.html` جوّه ريبو `Warehouse-Operations-Center`)
+🔗 **الواجهة:** https://ecommoda-dev.github.io/Warehouse-Operations-Center/Package-Transfer-To-Warehouse.html
+(صفحة `Package-Transfer-To-Warehouse.html` جوّه ريبو `Warehouse-Operations-Center`)
 
 > ⛔ **ممنوع يتضاف `index.html` هنا.** الأداة **مالهاش نسخة مستقلة بقرار** —
 > الدخول بيحصل مرة واحدة في الهب، والسر سر مجموعة `warehouse_ops`.

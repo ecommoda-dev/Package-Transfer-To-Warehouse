@@ -12,7 +12,7 @@
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
-> **`warehouse-return.html`** جوّه `Warehouse-Operations-Center`.
+> **`Package-Transfer-To-Warehouse.html`** جوّه `Warehouse-Operations-Center`.
 > ⛔ ممنوع يتضاف `index.html` هنا: نسخة مستقلة معناها مفتاح `localStorage`
 > تاني وسر تاني وشاشة دخول تانية — وكلهم بنود مفتوحة في الأدوات اللي
 > اتحوّلت للهب، ومفيش سبب نفتحهم من جديد.
@@ -26,7 +26,7 @@
 
 ```
 الـ Worker  : https://package-transfer-to-warehouse-worker.ecommoda-dev.workers.dev
-الواجهة     : https://ecommoda-dev.github.io/Warehouse-Operations-Center/warehouse-return.html
+الواجهة     : https://ecommoda-dev.github.io/Warehouse-Operations-Center/Package-Transfer-To-Warehouse.html
 tool في D1  : metafields_change           ← 🔴 سجل **مشترك**
 extra.sourceTool : package_transfer_to_warehouse   ← ده اللي بيفصل الأداة عن غيرها
 مجموعة السر : warehouse_ops             ← 🔴 مش سر فريد للأداة دي
@@ -493,7 +493,7 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
   بالظبط).
 - ⚠️ **الرد للواجهة زي ما هو بالظبط** — صفر تغيير في العقد (`shapeOrder`
   نفسها، نفس المفاتيح). الفرق الوحيد: عدد الصفوف أقل، لأن اللي اتشال كان
-  هيترمى في `wocWarehouseQueue` أصلاً (تحقّق: `warehouse-return.html` و
+  هيترمى في `wocWarehouseQueue` أصلاً (تحقّق: `Package-Transfer-To-Warehouse.html` و
   `index.html` بيطبّقوا الفلترة فورًا على `data.orders` بلا استخدام تاني
   للمصفوفة الخام). ⛔ **صفر رفع لـ `warehouse.min` في الـ shell** — العقد ما
   اتغيّرش.
@@ -534,7 +534,12 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 24-09-2026 — `1.4.1` (🔴 **الحارس الديناميكي لقيم اللوج (الطبقة ٥
+آخر تحديث: 25-09-2026 — **صفحة الهب اتسمّت تاني.** رابط الصفحة جوّه
+`Warehouse-Operations-Center` بقى `Package-Transfer-To-Warehouse.html` بدل
+`warehouse-return.html` — قاعدة جديدة هناك: رابط أي أداة مدمجة يتاخد بالنص
+من اسم ريبو الـ Worker بتاعها. صفر تعديل Worker هنا — تحديث توثيقي بحت.
+
+24-09-2026 — `1.4.1` (🔴 **الحارس الديناميكي لقيم اللوج (الطبقة ٥
 · `ecommoda-worker-builder` Step 7-ج).** `check-log-values.mjs` اتستبدل
 بنسخة مصلَّحة بتمسك `{ tool, type }` object shorthand كمان (مش `type:` بنقطتين
 بس) — التشيك القديم كان بيعدّي عليه في صمت. القياس على الكود الحالي: صفر
