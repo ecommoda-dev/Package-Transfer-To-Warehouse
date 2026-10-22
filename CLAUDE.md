@@ -2,13 +2,13 @@
 
 # قسم استلام المرتجعات — Package Transfer To Warehouse (`Package-Transfer-To-Warehouse`)
 
-![version](https://img.shields.io/badge/worker-v1.4.0-blue)
+![version](https://img.shields.io/badge/worker-v1.5.0-blue)
 
 **بتعمل إيه:** بتسجّل رجوع الطرد **للمخزن**. الموظف بيسكن باركود الأوردر
 المرتجع أو الملغي، والأداة بتكتب `custom.package_whereabouts_s1` (أو `_s2`
 لدورة الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 **مين بيستخدمها:** المخزن
-**الإصدار:** `1.4.0` (`WORKER_VERSION` في `index.js`)
+**الإصدار:** `1.5.0` (`WORKER_VERSION` في `index.js`)
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
@@ -202,7 +202,11 @@ function computeOrdersSince() {
 | `diag` | GET | فحص ذاتي بلا كتابة — **مصفوفة `[{ ok, label, detail, hint }]`** |
 | `get_employees` | GET | فلتر الموظف في تاب السجل |
 | `get_ready_to_warehouse` | GET | المرتجع/الملغي من `2026-04-01` فأحدث بحقوله الخام |
-| **`scan`** | **POST** | قراءة الأوردر حيًّا + الحكم + `metafieldsSet` + صف D1 |
+| **`scan`** | **POST** | قراءة الأوردر حيًّا + الحكم + `metafieldsSet` + صف D1 — ⚠️ **الصفحة مابقتش بتناديه من v1.5.0** (فاضل لأي تاب على نسخة قديمة) |
+| **`order_items`** | **POST** | (v1.5.0) نفس الحكم + **قطع الطرد** — قراءة بحتة. الرفض/«خلاص متعمل» بيتسجّلوا صف `rejected` زي `scan` |
+| **`receive_order`** | **POST** | (v1.5.0) إعادة قراءة طازة + تحقق القطع → `metafieldsSet` (`Warehouse`) + سطور الدفتر + صف `update` |
+| `get_return_items` | GET | (v1.5.0) دفتر القطع: `pending` + `missing` (حد ٢٠٠٠) |
+| **`receive_item`** | **POST** | (v1.5.0) قفل سطر قطعة بالباركود (FIFO) أو بالـ `id` (يدوي) |
 | `get_logs` · `get_logs_count` · `get_logs_export` | GET | تاب السجل |
 
 > 🔴 **مفيش `check_employee`/`register_pin`/`verify_employee`/`log_logout`
@@ -259,6 +263,63 @@ function computeOrdersSince() {
 > 🔴 **البحث بالاسم بحث مش قراءة** — `name:#5362` بيطابق `#53621` كمان.
 > المطابقة التامة على الاسم الراجع **إلزامية**، ومن غيرها الأداة بتكتب
 > `Warehouse` على **أوردر تاني** (`shopify-graphql-helper` §name-search).
+
+## 🔴 v1.5.0 — الاستلام قطعة قطعة + دفتر القطع الراجعة (طلب أحمد 22-10-2026)
+
+**الفكرة:** الطرد بقى بيتسجّل «في المخزن» **بعد** ما الموظف يسكن قطعه — مش
+لحظة سكان باركود الأوردر. ومعاه **دفتر D1** للقطع اللي في المكتب ومستنية ترجع
+(التسليم الجزئي) أو اللي وصلت ناقصة.
+
+### الدفتر — `warehouse_return_items`
+
+```
+المخطط  : schema/warehouse_return_items.sql   ← 🔴 بيتعمل مرة واحدة يدويًا من D1 Console
+الحالات : pending (مستنية) · received (اتسلّمت) · missing (ناقصة)
+المصادر : partial_delivery (cycle_key='partial') · order_return (cycle_key='S1' أو Return GID)
+مفتاح   : UNIQUE (source, order_id, cycle_key, line_item_id, unit_index)   ← سطر لكل **وحدة**
+```
+
+| مين بيكتب | إيه |
+|---|---|
+| `partial-delivery-worker` | `pending` لكل قطعة اتشالت (الأوردر بيفضل `Shipped` فعمره ما بيظهر في الطابور) |
+| الـ Worker ده — `receive_order` | قطع الأوردر الكامل **وقت الاستلام**: `received` للمسكون و`missing` للناقص بإقرار |
+| الـ Worker ده — `receive_item` | `pending`/`missing` → `received` (`receive_mode` = scan/manual) |
+
+- 🔴 **السطر بيتعلّم «اتسلّم» مايتمسحش** (قرار أحمد) — الدفتر سجل مش طابور.
+- 🔴 **قطع الطرد مش `currentQuantity`** (الإلغاء/المرتجع بيصفّرها — مقيس حي):
+  S1 = `refunds.refundLineItems` بتاع سجل الإلغاء (`createdAt` في حدود ١٠ دقايق
+  من `cancelledAt`) · S2 = `returnLineItems` في آخر Return مش `CANCELED`/`DECLINED`
+  = **القطعة القديمة** الراجعة (مش قطعة الاستبدال). مفيش مصدر = `itemsUnknown`
+  والاستلام بتأكيد يدوي (`itemsUnknownAck`) من غير سطور دفتر.
+- 🔴 **S1 و S2 استعلامين منفصلين** — بلوك `returns` محتاج `read_returns`؛ في
+  استعلام واحد كان أي نقص في الصلاحية هيوقّع S1 كمان. `diag` فيه بند `read_returns`.
+
+### `receive_order` — التحقق قبل أي كتابة (كله `409` بلا كتابة)
+
+`not_found` · `already` · `rejected` · `needs_ack` (من غير `ack`) · `items_unknown`
+(من غير `itemsUnknownAck`) · **`items_changed`** (مفتاح مش في القطع الحيّة) ·
+**`uncovered`** (قطعة لا اتسكنت ولا اتعلّمت ناقصة) · **`missing_ack`** (ناقص من غير
+إقرار). ونفس المفتاح مسكون **و**ناقص = `400`.
+بعدها: `writeWhereabouts` (`Warehouse`) ← دفعة الدفتر (`db.batch`) ← صف `update`
+بـ`extra.itemByItem`/`units`/`ledger`.
+- ⚠️ **فشل الدفتر بعد كتابة العهدة = `warning`** مش `error` (فعل تكميلي) — العهدة
+  اتكتبت فعلاً.
+- ⚠️ **وجود ناقص = `warning`** بسطر «N قطعة ناقصة».
+
+### `receive_item` — قطعة سايبة
+
+- 🔴 **أقدم سطر الأول** (قرار أحمد): `pending` قبل `missing`، والأقدم `created_at`.
+- 🔴 **`UPDATE … WHERE id = ? AND status IN ('pending','missing')`** مشروط — جهازين
+  على نفس القطعة: التاني بياخد `already` مش نجاح كاذب.
+- ⚠️ مفيش سطر بالباركود = `not_found` بنص بيقول لو ده طرد أوردر كامل اسكن الأوردر.
+- ⚠️ **التتبّع بيبدأ من يوم النشر** — مفيش backfill.
+
+### ✅ الاختبار
+
+Worker على D1 حقيقي (SQLite · `node:sqlite`) + شوبيفاي وهمية: **٤٤ بند** (+٢٦ على
+`partial-delivery-worker`). والواجهة في `docs/warehouse-check.mjs` بريبو الهب
+(١٣٣ بند). ⚠️ **ما اتجرّبش على D1 ولا شوبيفاي الحقيقيين** — أول استلام بعد النشر
+هو الاختبار الفعلي.
 
 ## D1
 
@@ -326,6 +387,7 @@ const ALLOWED_ORIGINS = ['https://ecommoda-dev.github.io'];
 | ② | ربط Workers Builds على الريبو ده (`main`) | أي push مابينشرش |
 | ③ | **`WORKER_SECRET` = قيمة مجموعة `warehouse_ops`** → **Promote** | كل نداء `401` |
 | ④ | `CLIENT_ID` + `CLIENT_SECRET` → **Promote** | OAuth بيفشل والطابور بيقع |
+| ⓪ | 🔴 **(v1.5.0) لزق `schema/warehouse_return_items.console.sql` (سطر واحد) في D1 Console** — ⛔ مش الملف المتعلّق: الكونسول بيحوّل اللصق لسطر واحد فأول `--` بيبلع الباقي (`incomplete input`) (`ecommoda-dev-logs`) — **قبل** نشر الـ Worker ده و`partial-delivery-worker` | `get_return_items` بيرجع `500` بيقول الجدول مش موجود، و`receive_order` بيرجع `warning` (العهدة اتكتبت والدفتر لأ) |
 | ⑤ | تسجيل الأداة في **جدول كُتّاب `metafields_change`** في `ecommoda-constants` (§7 · `references/d1-history.md`) — ومعاه انحراف `sourceTool` | جرد بيعدّ الصف ده كأداة واحدة **بيغلط**، وجرد بيدوّر على `extra.source` **بيرجّع صفر** |
 
 > 🔴 **③ أهم واحدة فيهم، والفخّ إن `WORKER_SECRET` هنا مش قيمة فريدة.** الهب
@@ -360,6 +422,13 @@ node docs/warehouse-check.mjs      # ٨٣ بند
 >   تاني (٥٩ صف فشل كذّاب في سكانر المرتجعات).
 
 ## مسائل مفتوحة
+
+- 🔴 **(v1.5.0) جدول `warehouse_return_items` لازم يتعمل يدويًا** (خطوة ⓪ فوق).
+- 🟡 **(v1.5.0) `read_returns` لازم تبقى في صلاحيات الـ Custom App** — من غيرها
+  أوردرات S2 (`Returned` دورة استرجاع/استبدال) بترجع `itemsUnknown` (تأكيد يدوي).
+  `?action=diag` بيقول.
+- 🟡 **(v1.5.0) S1 `Returned` من غير سجل إلغاء** = `itemsUnknown` — مفيش مصدر
+  موثوق لقطعه غير سجل الإلغاء.
 
 - 🔴 **الأربع خطوات النشر اليدوية فوق — كلها حاجزة** (إنشاء الـ Worker ·
   Builds · السر · OAuth).
@@ -519,13 +588,13 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 | المهارة | الإصدار وقت آخر تعديل |
 |---|---|
-| ecommoda-worker-builder | **v3.7.0** |
+| ecommoda-worker-builder | **v3.10.0** |
 | ecommoda-constants | **v3.1.0** |
 | ecommoda-order-lifecycle | **v1.8.0** |
-| shopify-graphql-helper | **v1.1.0** |
+| shopify-graphql-helper | **v2.3.0** |
 | ecommoda-html-builder | **v6.6.0** |
 
-آخر مطابقة: 24-09-2026 · الـ Worker `1.4.1`
+آخر مطابقة: 22-10-2026 · الـ Worker `1.5.0`
 🔴 معلّقة: **إنشاء الـ Worker + ربط Builds + `WORKER_SECRET` (سر `warehouse_ops`)
 + `CLIENT_ID`/`CLIENT_SECRET` → Promote** · **تسجيل الأداة ككاتب جديد على
 `metafields_change` في `ecommoda-constants` §7 (بقيمة `extra.sourceTool`)** ·
@@ -534,7 +603,11 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 25-09-2026 — **صفحة الهب اتسمّت تاني.** رابط الصفحة جوّه
+آخر تحديث: 22-10-2026 — `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
+`receive_order` · `get_return_items` · `receive_item` + دفتر D1
+`warehouse_return_items`. `scan` والطابور ما اتلمسوش)
+
+25-09-2026 — **صفحة الهب اتسمّت تاني.** رابط الصفحة جوّه
 `Warehouse-Operations-Center` بقى `Package-Transfer-To-Warehouse.html` بدل
 `warehouse-return.html` — قاعدة جديدة هناك: رابط أي أداة مدمجة يتاخد بالنص
 من اسم ريبو الـ Worker بتاعها. صفر تعديل Worker هنا — تحديث توثيقي بحت.
