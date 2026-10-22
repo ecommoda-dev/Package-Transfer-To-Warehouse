@@ -45,7 +45,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.5.0';
+const WORKER_VERSION = '1.6.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -636,16 +636,21 @@ function assertEnv(env, ...groups) {
 //    وهو مش كده.
 //    ⛔ ممنوع يترجع كحقل ولا كعمود إلا لما يبقى فيه **تسجيل حقيقي** لوقت
 //       الرجوع (ميتافيلد بتكتبه الأداة دي نفسها وقت السكانة مثلاً).
+// 🔴 **v1.6.0 (قرار أحمد 22-10-2026): الطابور بقى بعمود «العنوان» بدل «العميل»
+//    و«تاريخ الأوردر».** فـ`shippingAddress` بقى بيجيب أجزاء العنوان
+//    (`address1`/`address2`/`city`/`province`) بدل اسم العميل، و`createdAt`
+//    اتشال من الاستعلام ومن `shapeOrder` (مفيش مستهلك ليه). أرضية التاريخ
+//    (`computeOrdersSince`) بتتطبّق في **نص الاستعلام** (`created_at:>=`) —
+//    مش بقراءة الحقل — فشيله ما بيأثّرش عليها.
 const ORDER_FIELDS = `
   id
   legacyResourceId
   name
-  createdAt
   cancelledAt
   displayFulfillmentStatus
   currentSubtotalLineItemsQuantity
   currentTotalPriceSet { shopMoney { amount } }
-  shippingAddress { name }
+  shippingAddress { address1 address2 city province }
   zone:    metafield(namespace: "custom", key: "zone") { value }
   courier: metafield(namespace: "custom", key: "courier") { value }
   s1:      metafield(namespace: "custom", key: "manual_status") { value }
@@ -688,15 +693,23 @@ query WarehouseStep1($q: String!, $after: String, $n: Int!) {
 // ⚠️ الشكل ده **عقد مع الواجهة**: `wocWarehouseGate` في الـ shell بتقرا
 //    المفاتيح دي بالاسم. تغيير اسم مفتاح هنا = الطابور يرجع فاضي **بلا أي
 //    خطأ**.
+// 🔴 «العنوان» في الطابور: سطر واحد — الشارع ثم المدينة ثم المحافظة. الفاضي `null`
+//    (الواجهة بتعرض `—`) مش نص فاضي.
+function formatAddress(a) {
+  if (!a) return null;
+  const txt = [a.address1, a.address2, a.city, a.province]
+    .map(x => String(x || '').trim()).filter(Boolean).join('، ');
+  return txt || null;
+}
+
 function shapeOrder(o) {
   return {
     orderId:   o.legacyResourceId || (o.id ? String(o.id).split('/').pop() : null),
     orderGid:  o.id,
     orderName: o.name,
-    createdAt: o.createdAt,
     cancelledAt: o.cancelledAt || null,
     fulfillment: o.displayFulfillmentStatus || null,
-    customer:  o.shippingAddress?.name || null,
+    address:   formatAddress(o.shippingAddress),
     itemsQty:  o.currentSubtotalLineItemsQuantity ?? null,
     total:     o.currentTotalPriceSet?.shopMoney?.amount ?? null,
     zone:      o.zone?.value    || null,
@@ -964,18 +977,20 @@ function evaluate(o) {
              + 'الطرد ده مش راجع للمخزن' };
   }
 
-  // ③ متغلّف فعلاً — بميتافيلد الماكينة بتاعتها
-  // 🔴 صف S2 بيتفحص بـ`s2_packing_date_time` **مش** `s1_…`. الفحص بـ`s1_…`
-  //    على صف S2 بيعدّي على طرد **ما اتغلّفش** (مقيس 15-09-2026 على أداة
-  //    المكتب: ٦ من ٦ صفوف S2 كانت هتعدّي، والصح ٢).
-  // ⚠️ **ومعنى الشرط هنا أقوى من هناك:** أوردر اتلغى قبل ما يتغلّف **مفيهوش
-  //    طرد أصلاً** — مفيش حاجة ترجع على الرف، والمنتجات ما خرجتش من مكانها.
-  const packedAt = machine === 's1' ? o.packedAtS1 : o.packedAtS2;
-  if (!packedAt) {
+  // ③ متغلّف فعلاً — **وقت تغليف الشحنة الأصلية (S1)** على الماكينتين
+  // 🔴 **v1.6.0 — قرار أحمد 22-10-2026:** الشرط كان بيفحص `s2_packing_date_time`
+  //    على صف S2، فكل **استرجاع خالص** (`#53764`) كان بيترفض بـ«مفيش طرد يرجع»
+  //    — مع إن الطرد الراجع هو الشحنة الأصلية اللي اتغلّفت وخرجت، ومفيش طرد S2
+  //    اتغلّف أصلاً. فحص `s2_…` صح في أداة المكتب (الطرد الخارج)، **غلط هنا**
+  //    (الطرد الراجع). التفاصيل في `packedAtOf` فوق.
+  // ⚠️ **ومعنى الشرط هنا أقوى من هناك:** أوردر اتلغى قبل ما يتغلّف **مفيهوش طرد
+  //    أصلاً** — مفيش حاجة ترجع على الرف، والمنتجات ما خرجتش من مكانها.
+  // ⚠️ وتسلسل S2 راجع والشحنة الأصلية مش `Delivered` لسه بيطلع تحذير تحت (⑤).
+  if (!packedAtOf(o)) {
     return { level: 'blocked', code: 'not_packed', machine,
       message: machine === 's1'
         ? 'الأوردر ده ما اتغلّفش أصلاً — مفيش طرد يرجع، والمنتجات ما خرجتش من مكانها'
-        : 'طرد الاستبدال/الاسترجاع ما اتغلّفش — مفيش وقت تغليف (S2) مسجّل' };
+        : 'الشحنة الأصلية ما اتغلّفتش — مفيش وقت تغليف (S1) مسجّل، فمفيش طرد يرجع' };
   }
 
   // ④ العهدة الحالية
@@ -1121,8 +1136,8 @@ async function handleScan(env, request) {
       result, stage: 'write', machine: machineLabel(v.machine),
       zone: order.zone, courier: order.courier, s1: order.s1, s2: order.s2,
       cancelledAt: order.cancelledAt || undefined,
-      packedAt: v.machine === 's1' ? order.packedAtS1 : order.packedAtS2,
-      packedBy: v.machine === 's1' ? order.packedByS1 : order.packedByS2,
+      packedAt: packedAtOf(order),
+      packedBy: packedByOf(order),
       acknowledged: ack || undefined,
       warnings: (v.warnings && v.warnings.length) ? v.warnings : undefined,
       cairoDate: cairoDate(),
@@ -1135,6 +1150,18 @@ async function handleScan(env, request) {
     warnings: v.warnings || [], valueBefore: before, valueAfter: wrote, ...logged,
   }, 200, request);
 }
+
+// 🔴 **وقت التغليف ومين غلّف بيتقروا من S1 على الماكينتين** (v1.6.0 — قرار أحمد
+//    22-10-2026). الطرد اللي بيرجع المخزن هو **الشحنة الأصلية** اللي اتغلّفت
+//    وخرجت في S1: في دورة S2 (استرجاع/استبدال) القطعة الراجعة هي القديمة، و**في
+//    الاسترجاع الخالص مفيش طرد S2 اتغلّف أصلاً** (`s2_packing_date_time` فاضي
+//    طبيعي). فحص `s2_…` هنا كان بيرفض كل استرجاع بـ«مفيش طرد يرجع».
+// ⚠️ **ده عكس أداة المكتب بالحرف** — هناك الطرد S2 خارج، فهو طرد الاستبدال
+//    (`s2_…` صح). ⛔ ممنوع الرجوع لـ`machine === 's1' ? …S1 : …S2` هنا.
+// ⚠️ ومش بنفرّق بين استرجاع واستبدال: `exchangeLineItems` الفاضي مش دليل
+//    إنها استرجاع (`ecommoda-order-lifecycle` قاعدة ٨).
+function packedAtOf(o)  { return o.packedAtS1 || null; }
+function packedByOf(o)  { return o.packedByS1 || null; }
 
 function currentWhereabouts(o, machine) {
   if (!machine) return null;
@@ -1432,8 +1459,8 @@ async function handleReceiveOrder(env, request) {
       sourceTool: SOURCE_TOOL, result, stage: 'write', machine: machineLabel(v.machine),
       zone: order.zone, courier: order.courier, s1: order.s1, s2: order.s2,
       cancelledAt: order.cancelledAt || undefined,
-      packedAt: v.machine === 's1' ? order.packedAtS1 : order.packedAtS2,
-      packedBy: v.machine === 's1' ? order.packedByS1 : order.packedByS2,
+      packedAt: packedAtOf(order),
+      packedBy: packedByOf(order),
       acknowledged: ack || undefined,
       warnings: warnings.length ? warnings : undefined,
       itemByItem: true, itemsSource, cycleKey: cycleKey || undefined,
