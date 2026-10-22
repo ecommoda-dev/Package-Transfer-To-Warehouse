@@ -45,7 +45,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.6.0';
+const WORKER_VERSION = '1.7.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -793,6 +793,45 @@ function mergeStep1(s1Nodes, s2OnlyNodes) {
   return survivors;
 }
 
+// ─── §QUEUE::S2-CYCLE — «استبدال ولا استرجاع؟» لصفوف S2 (v1.7.0 · طلب أحمد 22-10-2026) ───
+// 🔴 `status_2_r_e` بيوصل لـ`Returned` من `Confirmed + RETURN` و`Confirmed + EXCHANGE`
+//    الاتنين، فالميتافيلد **بيضيّع** النوع. المصدر الوحيد: `returns[].exchangeLineItems`
+//    (`ecommoda-order-lifecycle` قاعدة ٨) — **أحدث** دورة مش ملغية (قاعدة ١٥).
+// ⚠️ **`exchange` مؤكَّد، و`return` مش مضمون:** `exchangeLineItems` بيفضل فاضي
+//    للأبد لو الموظف عدّل الأوردر بإيده وشال سطر الاستبدال (`#53531` · `#53701`).
+//    فالواجهة بتكتب «استرجاع» على إنه الأرجح مش المؤكد، ومابنركّبش أي فعل على التفرقة دي.
+// 🔴 **استعلام منفصل مش جوّه `ORDER_FIELDS`** — `returns` محتاجة `read_returns`، ولو
+//    اتحطت في الاستعلام الأساسي غياب الصلاحية كان هيوقّع الطابور كله (S1 كمان).
+//    فشله = `s2Cycle: null` («غير معروف») مش فشل الطابور.
+const S2_CYCLE_QUERY = `
+query WarehouseS2Cycle($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Order {
+      id
+      returns(first: 10) {
+        nodes { id status createdAt exchangeLineItems(first: 1) { nodes { id } } }
+      }
+    }
+  }
+}`;
+
+async function fetchS2CycleTypes(env, token, gids, costLog) {
+  const out = new Map();   // gid → 'exchange' | 'return' | null
+  for (let i = 0; i < gids.length; i += STEP2_CHUNK) {
+    const data = await shopifyGQL(env, token, S2_CYCLE_QUERY,
+      { ids: gids.slice(i, i + STEP2_CHUNK) }, 'warehouseS2Cycle', costLog);
+    for (const n of (data.data?.nodes || [])) {
+      if (!n) continue;
+      const live = (n.returns?.nodes || [])
+        .filter(r => r.status !== 'CANCELED' && r.status !== 'DECLINED')
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+      const cur = live[0];
+      out.set(n.id, !cur ? null : ((cur.exchangeLineItems?.nodes || []).length ? 'exchange' : 'return'));
+    }
+  }
+  return out;
+}
+
 // ─── §QUEUE::handleReadyQueue ───
 // بيجيب **تلات استعلامات**: `manual_status = Returned` · `manual_status =
 // Cancelled` · `status_2_r_e = Returned`. أوردر ممكن يكون في أكتر من واحد —
@@ -864,6 +903,21 @@ async function handleReadyQueue(env, request) {
     if (s.orderId) byId.set(s.orderId, s);
   }
 
+  // 🔴 نوع دورة S2 — لصفوف S2 بس (نفس أولوية `ecoWarehouseGate`: S1 الأول). فشله
+  //    مايوقّعش الطابور: `s2Cycle: null` والواجهة بتكتب «استبدال/استرجاع».
+  let cycleTypeFailed = null;
+  const s2Rows = [...byId.values()].filter(o =>
+    o.s2 === S2_STATUS.RETURNED && !o.cancelledAt && !S1_ELIGIBLE.has(o.s1 || ''));
+  if (s2Rows.length) {
+    try {
+      const cyc = await fetchS2CycleTypes(env, token, s2Rows.map(o => o.orderGid), costLog);
+      for (const o of s2Rows) o.s2Cycle = cyc.get(o.orderGid) ?? null;
+    } catch (e) {
+      cycleTypeFailed = String(e?.message || e).slice(0, 200);
+      for (const o of s2Rows) o.s2Cycle = null;
+    }
+  }
+
   const step1Cost = costLog.filter(c => c.op.startsWith('warehouseStep1')).reduce((s, c) => s + (c.actual || 0), 0);
   const step2Cost = costLog.filter(c => c.op === 'warehouseStep2').reduce((s, c) => s + (c.actual || 0), 0);
 
@@ -871,6 +925,8 @@ async function handleReadyQueue(env, request) {
     ok: true,
     orders: [...byId.values()],
     truncated: step1Truncated || step2Truncated,
+    // 🟡 v1.7.0 — لو استعلام نوع دورة S2 فشل (غالبًا `read_returns` ناقصة): الصفوف بـ`s2Cycle: null`
+    cycleTypeFailed,
     // 🔴 الأرضية بترجع في الرد عشان **الواجهة تعرضها من هنا** — مش مكتوبة
     //    بالإيد هناك. رقمان يفترقوا في صمت هو درس R1 بالحرف.
     ordersSince,
