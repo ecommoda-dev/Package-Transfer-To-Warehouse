@@ -2,13 +2,13 @@
 
 # قسم استلام المرتجعات — Package Transfer To Warehouse (`Package-Transfer-To-Warehouse`)
 
-![version](https://img.shields.io/badge/worker-v1.6.0-blue)
+![version](https://img.shields.io/badge/worker-v1.7.0-blue)
 
 **بتعمل إيه:** بتسجّل رجوع الطرد **للمخزن**. الموظف بيسكن باركود الأوردر
 المرتجع أو الملغي، والأداة بتكتب `custom.package_whereabouts_s1` (أو `_s2`
 لدورة الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 **مين بيستخدمها:** المخزن
-**الإصدار:** `1.6.0` (`WORKER_VERSION` في `index.js`)
+**الإصدار:** `1.7.0` (`WORKER_VERSION` في `index.js`)
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
@@ -265,6 +265,15 @@ function computeOrdersSince() {
 > 🔴 **البحث بالاسم بحث مش قراءة** — `name:#5362` بيطابق `#53621` كمان.
 > المطابقة التامة على الاسم الراجع **إلزامية**، ومن غيرها الأداة بتكتب
 > `Warehouse` على **أوردر تاني** (`shopify-graphql-helper` §name-search).
+
+## 🔴 v1.7.0 — «استبدال ولا استرجاع؟» في طابور الرجوع (طلب أحمد 22-10-2026)
+
+`status_2_r_e` بيوصل لـ`Returned` من `Confirmed + RETURN` و`Confirmed + EXCHANGE` الاتنين فبيضيّع النوع. الطابور بقى بيرجّع لصفوف S2 حقل **`s2Cycle`**: `'exchange'` · `'return'` · `null` (غير معروف).
+
+- 🔴 **المصدر:** `returns[].exchangeLineItems` على **أحدث** دورة مش `CANCELED`/`DECLINED` (قاعدة ١٥)، في **استعلام منفصل** (`S2_CYCLE_QUERY` — `returns` محتاجة `read_returns`، ولو اتحطت في `ORDER_FIELDS` غيابها كان هيوقّع الطابور كله). فشله = `s2Cycle: null` و`cycleTypeFailed` في الرد، **مش فشل الطابور**.
+- ⚠️ **`exchange` مؤكَّد، و`return` مش مضمون:** `exchangeLineItems` بيفضل فاضي للأبد لو الموظف عدّل الأوردر بإيده وشال سطر الاستبدال (`#53531` · `#53701` — قاعدة ٨). فالواجهة بتكتب «استرجاع» على إنه الأرجح، ⛔ ومايتركّبش عليه أي فعل (الكتابة والحارس **ما اتلمسوش**).
+- ⚠️ لصفوف S2 بس (نفس أولوية البوابة: S1 الأول). صفوف S1 ماعندهاش `s2Cycle`.
+- ✅ **`warehouse.min` ما اتغيّرش** — على Worker أقدم الواجهة بتكتب «استبدال/استرجاع» (تدهور آمن ومعلن).
 
 ## 🔴 v1.6.0 — الاسترجاع الخالص + عمود «العنوان» (قرار أحمد 22-10-2026)
 
@@ -625,7 +634,7 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 22-10-2026 — `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
+آخر تحديث: 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
 `receive_order` · `get_return_items` · `receive_item` + دفتر D1
 `warehouse_return_items`. `scan` والطابور ما اتلمسوش)
 
