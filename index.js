@@ -3,8 +3,15 @@
 // Worker: package-transfer-to-warehouse-worker — EcomModa
 // Tool:   قسم استلام المرتجعات (Package Transfer To Warehouse)
 //
-// skills: worker-builder v3.7.0 · constants v3.1.0 · order-lifecycle v1.8.0
-//         · shopify-graphql-helper v1.1.0 · html-builder v6.6.0 — 24-09-2026
+// skills: worker-builder v3.10.0 · constants v3.1.0 · order-lifecycle v1.8.0
+//         · shopify-graphql-helper v1.1.0 · html-builder v6.6.0 — 22-10-2026
+//
+// 🔴 **v1.5.0 (22-10-2026 · طلب أحمد) — الاستلام قطعة قطعة + دفتر القطع
+//    الراجعة** (`§RECEIVE` تحت): أربع endpoints جداد (`order_items` ·
+//    `receive_order` · `get_return_items` · `receive_item`) وجدول D1 جديد
+//    `warehouse_return_items` (`schema/warehouse_return_items.sql`).
+//    ⚠️ `scan` و`get_ready_to_warehouse` **ما اتغيّروش ولا حرف**. وصفر قيمة
+//    `type` جديدة في `logs` (نفس `update`/`rejected`).
 //
 // 🔴 **الحارس الديناميكي لقيم اللوج (الطبقة ٥ · worker-builder Step 7-ج)**
 //    اتضاف في `1.4.1` — `writeLog` بتكتب الصف عادي حتى لو `(tool, type)`
@@ -38,7 +45,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.4.1';
+const WORKER_VERSION = '1.5.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -1145,6 +1152,383 @@ async function safeLog(env, entry) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// §RECEIVE — الاستلام قطعة قطعة + دفتر القطع الراجعة (v1.5.0 · طلب أحمد 22-10-2026)
+// ══════════════════════════════════════════════════════════════
+// 🔴 **الدفتر** = جدول D1 `warehouse_return_items` (التعريف في
+//    `schema/warehouse_return_items.sql` في الريبو ده — بيتعمل مرة واحدة من
+//    D1 Console). سطر لكل **قطعة** (`unit_index`)، بتلات حالات:
+//    `pending` (مستنية الاستلام) · `received` (اتسلّمت للمخزن) · `missing` (ناقصة).
+//
+// 🔴 **مين بيكتب فيه (عقد — يتعدّل في الريبوهين مع بعض):**
+//    ① `partial-delivery-worker` → `pending` لكل قطعة اتشالت (source = partial_delivery).
+//       الأوردر بيفضل `Shipped` فعمره ما بيظهر في طابور المحطة — السطر ده هو
+//       الأثر الوحيد إن القطعة في المكتب.
+//    ② الـ Worker ده → بيقفل سطور ① (`receive_item`)، وبيكتب قطع الأوردرات
+//       الكاملة **وقت الاستلام** (`receive_order` · source = order_return).
+//       الأوردر الكامل موجود أصلاً في الطابور (§QUEUE)، وقطعه بتتقرا من شوبيفاي.
+//
+// ⚠️ **`scan` و`get_ready_to_warehouse` ما اتلمسوش** — الصفحة الجديدة بتنادي
+//    `order_items` + `receive_order` بدل `scan`، و`scan` فاضل لأي تاب مفتوح على
+//    نسخة الصفحة القديمة. الطابور نفس العقد بالحرف.
+//
+// 🔴 **قطع الطرد مش في `currentQuantity`** — الإلغاء/المرتجع بيصفّرها (مقيس حي
+//    22-10-2026 على #61251 · #61404). المصادر الحقيقية (مقيسة كمان):
+//    · S1 (ملغي / مرتجع قبل التسليم): `refunds.refundLineItems` بتاع سجل الإلغاء
+//      — اللي اتعمل في نفس لحظة `cancelledAt`. القطع اللي اتشالت قبلها بالتسليم
+//      الجزئي **مش فيه** (اتشالت قبل الإلغاء)، فمفيش عدّ مرتين.
+//    · S2 (مرتجع دورة استرجاع/استبدال): `returnLineItems` في آخر Return مش ملغي
+//      = **القطعة القديمة** الراجعة من العميل (مش قطعة الاستبدال — #60513).
+const LEDGER_TABLE        = 'warehouse_return_items';
+const LEDGER_SRC_PARTIAL  = 'partial_delivery';
+const LEDGER_SRC_ORDER    = 'order_return';
+const LEDGER_LIST_MAX     = 2000;                 // حارس — القايمة المستنية عشرات مش آلاف
+const CANCEL_REFUND_WINDOW_MS = 10 * 60 * 1000;   // سجل الإلغاء بيتعمل قبل cancelledAt بثانية-اتنين (مقيس)
+
+// ⚠️ **استعلامين منفصلين بالماكينة مش واحد** — `returns` محتاجة صلاحية
+//    `read_returns`. لو اتجمعوا في استعلام واحد، غياب الصلاحية كان هيوقّع
+//    استلام S1 كمان (اللي مالوش أي علاقة بالمرتجعات).
+const ORDER_ITEMS_S1_QUERY = `
+query OrderItemsS1($id: ID!) {
+  order(id: $id) {
+    id
+    cancelledAt
+    lineItems(first: 50) { nodes { id sku name currentQuantity variant { id barcode } } }
+    refunds {
+      createdAt
+      refundLineItems(first: 50) { nodes { quantity lineItem { id sku name variant { id barcode } } } }
+    }
+  }
+}`;
+const ORDER_ITEMS_S2_QUERY = `
+query OrderItemsS2($id: ID!) {
+  order(id: $id) {
+    id
+    returns(first: 10) {
+      nodes {
+        id status createdAt
+        returnLineItems(first: 50) {
+          nodes { quantity ... on ReturnLineItem { fulfillmentLineItem { lineItem { id sku name variant { id barcode } } } } }
+        }
+      }
+    }
+  }
+}`;
+
+function addItem(map, li, qty) {
+  if (!li?.id || !(qty > 0)) return;
+  const cur = map.get(li.id);
+  if (cur) { cur.qty += qty; return; }
+  map.set(li.id, { lineItemId: li.id, sku: li.sku || null, title: li.name || null,
+                   variantId: li.variant?.id || null, barcode: li.variant?.barcode || null, qty });
+}
+
+// ─── §RECEIVE::fetchOrderItems — قطع الطرد الفعلية حسب الماكينة ───
+// بيرجّع { items, cycleKey, itemsSource } — و`items = []` معناه «ما قدرناش
+// نحدد القطع» (مش «الطرد فاضي»)، والواجهة بتطلب إقرار صريح قبل الإكمال.
+async function fetchOrderItems(env, token, orderGid, machine) {
+  const data = await shopifyGQL(env, token,
+    machine === 's2' ? ORDER_ITEMS_S2_QUERY : ORDER_ITEMS_S1_QUERY, { id: orderGid },
+    machine === 's2' ? 'orderItemsS2' : 'orderItemsS1');
+  const o = data.data?.order;
+  if (!o) throw new Error('orderItems: الأوردر مارجعش من شوبيفاي');
+  const map = new Map();
+
+  if (machine === 's2') {
+    const live = (o.returns?.nodes || [])
+      .filter(r => r.status !== 'CANCELED' && r.status !== 'DECLINED')
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    const ret = live[0];
+    if (!ret) return { items: [], cycleKey: null, itemsSource: 'none' };
+    for (const n of (ret.returnLineItems?.nodes || []))
+      addItem(map, n.fulfillmentLineItem?.lineItem, n.quantity);
+    return { items: [...map.values()], cycleKey: ret.id, itemsSource: 'return' };
+  }
+
+  // S1
+  if (o.cancelledAt) {
+    const at = Date.parse(o.cancelledAt);
+    for (const rf of (o.refunds || [])) {
+      const t = Date.parse(rf.createdAt);
+      if (!Number.isFinite(t) || Math.abs(t - at) > CANCEL_REFUND_WINDOW_MS) continue;
+      for (const n of (rf.refundLineItems?.nodes || [])) addItem(map, n.lineItem, n.quantity);
+    }
+    return { items: [...map.values()], cycleKey: 'S1', itemsSource: 'cancel_refund' };
+  }
+  // الحالة متسجّلة Returned/Cancelled والأوردر مش ملغي على شوبيفاي — القطع لسه
+  // في `currentQuantity`.
+  for (const li of (o.lineItems?.nodes || [])) addItem(map, li, li.currentQuantity);
+  return { items: [...map.values()], cycleKey: 'S1', itemsSource: 'current' };
+}
+
+function unitKey(lineItemId, unitIndex) { return `${lineItemId}#${unitIndex}`; }
+function expandUnits(items) {
+  const out = [];
+  for (const it of items) for (let u = 1; u <= it.qty; u++) out.push({ ...it, unitIndex: u, key: unitKey(it.lineItemId, u) });
+  return out;
+}
+
+function ledgerMissingMsg(e) {
+  return /no such table/i.test(String(e?.message || ''))
+    ? `جدول ${LEDGER_TABLE} مش موجود في D1 — شغّل schema/${LEDGER_TABLE}.sql مرة واحدة من D1 Console`
+    : String(e?.message || e);
+}
+
+// ─── §RECEIVE::handleOrderItems — الخطوة ① بعد سكان باركود الأوردر ───
+// 🔴 نفس أحكام `scan` بالحرف (resolveOrder + evaluate)، ونفس صف السجل على
+//    الرفض/«خلاص متعمل» — عشان «كل سكانة بتسيب صف» تفضل صحيحة. الفرق إن
+//    الحالة السليمة **مابتكتبش** — بترجّع قايمة القطع، والكتابة في `receive_order`.
+async function handleOrderItems(env, request) {
+  const body = await request.json().catch(() => ({}));
+  const code     = String(body.code || '').trim();
+  const employee = body.employee ? String(body.employee) : null;
+  const ack      = body.ack === true;
+  if (!code) return json({ ok: false, error: 'مفيش باركود في الطلب' }, 400, request);
+
+  assertEnv(env, 'shopify');
+  const token = await getAccessToken(env);
+  const { order, reason } = await resolveOrder(env, token, code);
+
+  if (!order) {
+    const logged = await safeLog(env, {
+      tool: TOOL_NAME, type: 'rejected', employee, notes: reason,
+      extra: { sourceTool: SOURCE_TOOL, result: 'rejected', stage: 'lookup', code: 'not_found', scanned: code },
+    });
+    return json({ ok: true, result: 'rejected', code: 'not_found', message: reason, scanned: code, ...logged }, 200, request);
+  }
+
+  const v = evaluate(order);
+  if (v.level === 'warn' && !ack) {
+    return json({ ok: true, result: 'needs_ack', code: v.code, message: v.message,
+      warnings: v.warnings || [], machine: v.machine, order }, 200, request);
+  }
+  if (v.level === 'blocked' || v.level === 'already') {
+    const result = v.level === 'already' ? 'already' : 'rejected';
+    const logged = await safeLog(env, {
+      tool: TOOL_NAME, type: 'rejected', employee,
+      orderId: order.orderId, orderName: order.orderName,
+      valueBefore: currentWhereabouts(order, v.machine), valueAfter: null, notes: v.message,
+      extra: { sourceTool: SOURCE_TOOL, result, stage: 'lookup', code: v.code, machine: machineLabel(v.machine),
+               zone: order.zone, courier: order.courier, s1: order.s1, s2: order.s2 },
+    });
+    return json({ ok: true, result, code: v.code, message: v.message, order, machine: v.machine, ...logged }, 200, request);
+  }
+
+  const { items, cycleKey, itemsSource } = await fetchOrderItems(env, token, order.orderGid, v.machine);
+  return json({ ok: true, result: 'items', order, machine: v.machine, warnings: v.warnings || [],
+    items, cycleKey, itemsSource, itemsUnknown: items.length === 0 }, 200, request);
+}
+
+// 409 = «مفيش كتابة حصلت — راجع وأعد». `error` بيتملّى من `message` عشان أي مستهلك
+// بيقرا `error` بس (زي `ecoApi`) يعرض الجملة نفسها مش «HTTP 409».
+function conflict409(request, obj) {
+  return json({ ...obj, error: obj.error || obj.message }, 409, request);
+}
+
+// ─── §RECEIVE::handleReceiveOrder — الخطوة ② بعد سكان كل القطع ───
+// الطلب: { code, employee, ack, scanned: [{ key, mode }], missing: [key],
+//          missingAck, itemsUnknownAck }
+// 🔴 **كل حاجة بتتعاد على قراءة طازجة** (worker-builder ⑩④): الحكم والقطع.
+//    أي مفتاح قطعة مش في القايمة الحيّة، أو قطعة مش مغطّية (لا اتسكنت ولا
+//    اتعلّمت ناقصة) = 409 **قبل** أي كتابة.
+// 🔴 **الترتيب:** عهدة الطرد الأول (الفعل الأساسي — زي `scan` بالحرف)، وبعدها
+//    الدفتر (تكميلي — فشله `warning` مش `error`).
+async function handleReceiveOrder(env, request) {
+  const body = await request.json().catch(() => ({}));
+  const code     = String(body.code || '').trim();
+  const employee = body.employee ? String(body.employee) : null;
+  const ack      = body.ack === true;
+  const scanned  = Array.isArray(body.scanned) ? body.scanned : [];
+  const missing  = Array.isArray(body.missing) ? body.missing.map(String) : [];
+  if (!code) return json({ ok: false, error: 'مفيش باركود في الطلب' }, 400, request);
+
+  assertEnv(env, 'shopify');
+  const token = await getAccessToken(env);
+  const { order, reason } = await resolveOrder(env, token, code);
+  if (!order) return conflict409(request, { ok: false, result: 'rejected', code: 'not_found', message: reason });
+
+  const v = evaluate(order);
+  if (v.level === 'blocked' || v.level === 'already') {
+    // الحالة اتغيّرت بين السكانة والإكمال — مفيش كتابة، والواجهة بتعيد السكان.
+    return conflict409(request, { ok: false, result: v.level === 'already' ? 'already' : 'rejected', code: v.code,
+      message: v.message, order });
+  }
+  if (v.level === 'warn' && !ack)
+    return conflict409(request, { ok: false, result: 'needs_ack', code: v.code, message: v.message, warnings: v.warnings || [] });
+
+  const { items, cycleKey, itemsSource } = await fetchOrderItems(env, token, order.orderGid, v.machine);
+  const units = expandUnits(items);
+  const scannedMap = new Map();
+  for (const s of scanned) {
+    const k = String(s?.key || '');
+    scannedMap.set(k, s?.mode === 'manual' ? 'manual' : 'scan');
+  }
+
+  if (!units.length) {
+    if (body.itemsUnknownAck !== true)
+      return conflict409(request, { ok: false, result: 'needs_ack', code: 'items_unknown',
+        message: 'ما قدرناش نحدد قطع الطرد من شوبيفاي — أكّد الاستلام يدويًا' });
+  } else {
+    const valid = new Set(units.map(u => u.key));
+    const unknown = [...scannedMap.keys(), ...missing].filter(k => !valid.has(k));
+    if (unknown.length)
+      return conflict409(request, { ok: false, result: 'stale', code: 'items_changed',
+        message: 'قطع الأوردر اتغيّرت على شوبيفاي من وقت السكان — اسكن الأوردر تاني', items });
+    const both = missing.filter(k => scannedMap.has(k));
+    if (both.length)
+      return json({ ok: false, error: 'نفس القطعة اتعلّمت «اتسكنت» و«ناقصة» مع بعض' }, 400, request);
+    const uncovered = units.filter(u => !scannedMap.has(u.key) && !missing.includes(u.key));
+    if (uncovered.length)
+      return conflict409(request, { ok: false, result: 'incomplete', code: 'uncovered',
+        message: `فاضل ${uncovered.length} قطعة لا اتسكنت ولا اتعلّمت ناقصة` });
+    if (missing.length && body.missingAck !== true)
+      return conflict409(request, { ok: false, result: 'needs_ack', code: 'missing_ack',
+        message: 'فيه قطع ناقصة — لازم إقرار صريح' });
+  }
+
+  // ① الفعل الأساسي — نفس `scan` بالحرف
+  const before = currentWhereabouts(order, v.machine);
+  let wrote = null, error = null;
+  try { wrote = await writeWhereabouts(env, token, order.orderGid, v.machine); }
+  catch (e) { error = e.message; }
+
+  // ② الدفتر — بعد نجاح الكتابة بس
+  const warnings = [...(v.warnings || [])];
+  let ledger = null;
+  const missingUnits = units.filter(u => missing.includes(u.key));
+  if (!error && units.length) {
+    try {
+      const now = new Date().toISOString();
+      const stmt = env.DB.prepare(`
+        INSERT OR IGNORE INTO ${LEDGER_TABLE}
+          (source, cycle_key, order_id, order_name, machine, line_item_id, variant_id, sku, barcode, title,
+           unit_index, status, created_at, created_by, received_at, received_by, receive_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const res = await env.DB.batch(units.map(u => {
+        const isMissing = missing.includes(u.key);
+        return stmt.bind(LEDGER_SRC_ORDER, cycleKey, String(order.orderId), order.orderName,
+          machineLabel(v.machine), u.lineItemId, u.variantId, u.sku, u.barcode, u.title, u.unitIndex,
+          isMissing ? 'missing' : 'received', now, employee,
+          isMissing ? null : now, isMissing ? null : employee, isMissing ? null : scannedMap.get(u.key));
+      }));
+      ledger = { units: units.length, inserted: res.reduce((s, r) => s + (r?.meta?.changes || 0), 0),
+                 missing: missingUnits.length };
+    } catch (e) {
+      ledger = { error: ledgerMissingMsg(e) };
+      warnings.push(`عهدة الطرد اتسجّلت «في المخزن»، لكن القطع ما اتسجّلتش في دفتر الرجوع (${ledger.error})`);
+    }
+  }
+  if (!error && missingUnits.length)
+    warnings.push(`${missingUnits.length} قطعة ناقصة: ${missingUnits.map(u => u.sku || u.title).join('، ')} — اتسجّلت «ناقصة» ومستنية مراجعة`);
+  if (!error && !units.length)
+    warnings.push('قطع الطرد ما اتحددتش من شوبيفاي — الاستلام اتأكد يدويًا من غير سكان القطع');
+
+  const result = error ? 'error' : (warnings.length ? 'warning' : 'success');
+  const logged = await safeLog(env, {
+    tool: TOOL_NAME, type: 'update', employee,
+    orderId: order.orderId, orderName: order.orderName,
+    valueBefore: before, valueAfter: error ? null : WA_TARGET,
+    notes: error || warnings.join(' · ') || null,
+    extra: {
+      sourceTool: SOURCE_TOOL, result, stage: 'write', machine: machineLabel(v.machine),
+      zone: order.zone, courier: order.courier, s1: order.s1, s2: order.s2,
+      cancelledAt: order.cancelledAt || undefined,
+      packedAt: v.machine === 's1' ? order.packedAtS1 : order.packedAtS2,
+      packedBy: v.machine === 's1' ? order.packedByS1 : order.packedByS2,
+      acknowledged: ack || undefined,
+      warnings: warnings.length ? warnings : undefined,
+      itemByItem: true, itemsSource, cycleKey: cycleKey || undefined,
+      units: units.length, unitsMissing: missingUnits.length || undefined,
+      ledger: ledger || undefined,
+      cairoDate: cairoDate(),
+    },
+  });
+
+  return json({ ok: !error, result, code: error ? 'write_failed' : 'written', message: error || null,
+    order, machine: v.machine, warnings, valueBefore: before, valueAfter: wrote,
+    units: units.length, missing: missingUnits.length, ledger, ...logged }, 200, request);
+}
+
+// ─── §RECEIVE::handleReturnItems — القطع المستنية + الناقصة ───
+// القايمة بتاعة تبويب «قطع التسليم الجزئي» وصف الشاشة الرئيسية.
+async function handleReturnItems(env, request) {
+  try {
+    const rows = await env.DB.prepare(`
+      SELECT id, source, order_id, order_name, machine, line_item_id, sku, barcode, title,
+             unit_index, status, created_at, created_by
+      FROM ${LEDGER_TABLE}
+      WHERE status IN ('pending', 'missing')
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?`).bind(LEDGER_LIST_MAX + 1).all();
+    const list = (rows.results || []);
+    const truncated = list.length > LEDGER_LIST_MAX;
+    const items = list.slice(0, LEDGER_LIST_MAX).map(r => ({
+      id: r.id, source: r.source, orderId: r.order_id, orderName: r.order_name, machine: r.machine,
+      lineItemId: r.line_item_id, sku: r.sku, barcode: r.barcode, title: r.title,
+      unitIndex: r.unit_index, status: r.status, createdAt: r.created_at, createdBy: r.created_by,
+    }));
+    const counts = { pending: 0, missing: 0 };
+    for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1;
+    return json({ ok: true, items, counts, truncated, fetchedAt: new Date().toISOString() }, 200, request);
+  } catch (e) {
+    return json({ ok: false, error: ledgerMissingMsg(e) }, 500, request);
+  }
+}
+
+// ─── §RECEIVE::handleReceiveItem — سكان قطعة سايبة (أو استلام يدوي بالـ id) ───
+// 🔴 **بالباركود: الأقدم أولاً** (قرار أحمد 22-10-2026) — `pending` قبل `missing`،
+//    وبعدها الأقدم تسجيلاً. والـ UPDATE مشروط بالحالة (`status IN (…)`) فقطعة
+//    اتقفلت من جهاز تاني في نفس اللحظة مابتتقفلش مرتين.
+async function handleReceiveItem(env, request) {
+  const body = await request.json().catch(() => ({}));
+  const employee = body.employee ? String(body.employee) : null;
+  const barcode  = String(body.barcode || '').replace(/\D/g, '');
+  const id       = Number.isInteger(body.id) ? body.id : null;
+  if (!barcode && !id) return json({ ok: false, error: 'مفيش باركود ولا id في الطلب' }, 400, request);
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const row = id
+        ? await env.DB.prepare(`SELECT * FROM ${LEDGER_TABLE} WHERE id = ?`).bind(id).first()
+        : await env.DB.prepare(`
+            SELECT * FROM ${LEDGER_TABLE}
+            WHERE barcode = ? AND status IN ('pending', 'missing')
+            ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at ASC, id ASC
+            LIMIT 1`).bind(barcode).first();
+
+      if (!row || (id && row.status === 'received')) {
+        if (id && row) return json({ ok: true, result: 'already', message: 'القطعة دي اتسلّمت خلاص',
+          item: { id: row.id, orderName: row.order_name, sku: row.sku } }, 200, request);
+        if (id) return json({ ok: false, result: 'not_found', message: 'السطر ده مش موجود' }, 404, request);
+        const done = await env.DB.prepare(`
+          SELECT order_name, sku, received_at, received_by FROM ${LEDGER_TABLE}
+          WHERE barcode = ? AND status = 'received' ORDER BY received_at DESC LIMIT 1`).bind(barcode).first();
+        return json({ ok: true, result: done ? 'already' : 'not_found', barcode,
+          message: done
+            ? `مفيش قطعة مستنية بالباركود ده — آخر قطعة بيه اتسلّمت خلاص (${done.order_name || '—'})`
+            : 'مفيش قطعة مستنية الاستلام بالباركود ده — لو ده طرد أوردر كامل، اسكن باركود الأوردر' }, 200, request);
+      }
+
+      const now = new Date().toISOString();
+      const up = await env.DB.prepare(`
+        UPDATE ${LEDGER_TABLE}
+        SET status = 'received', received_at = ?, received_by = ?, receive_mode = ?
+        WHERE id = ? AND status IN ('pending', 'missing')`)
+        .bind(now, employee, id ? 'manual' : 'scan', row.id).run();
+      if ((up?.meta?.changes || 0) === 1) {
+        return json({ ok: true, result: 'success', barcode: barcode || row.barcode,
+          item: { id: row.id, source: row.source, orderId: row.order_id, orderName: row.order_name,
+                  sku: row.sku, title: row.title, unitIndex: row.unit_index, wasStatus: row.status,
+                  receivedAt: now, receivedBy: employee } }, 200, request);
+      }
+      // جهاز تاني قفل نفس السطر — جرّب السطر اللي بعده
+    }
+    return json({ ok: false, error: 'تعارض مع جهاز تاني — اسكن القطعة تاني' }, 409, request);
+  } catch (e) {
+    return json({ ok: false, error: ledgerMissingMsg(e) }, 500, request);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 // §DIAG
 // ══════════════════════════════════════════════════════════════
 // الشكل المعتمد للجديد: **مصفوفة** `[{ ok, label, detail }]` — `ok` صريحة.
@@ -1184,6 +1568,18 @@ async function handleDiag(env, request) {
          'binding اسمه `DB` في `wrangler.toml` — أي اسم تاني = كتابة فاشلة بصمت');
   }
 
+  // ②-ب دفتر القطع الراجعة (v1.5.0)
+  try {
+    const r = await env.DB.prepare(
+      `SELECT SUM(status = 'pending') AS p, SUM(status = 'missing') AS m, COUNT(*) AS n FROM ${LEDGER_TABLE}`
+    ).first();
+    push(true, `دفتر القطع الراجعة (${LEDGER_TABLE})`,
+         `موجود — ${r?.p ?? 0} مستنية · ${r?.m ?? 0} ناقصة · ${r?.n ?? 0} سطر إجمالي`);
+  } catch (e) {
+    push(false, `دفتر القطع الراجعة (${LEDGER_TABLE})`, `FAILED: ${ledgerMissingMsg(e)}`,
+         `شغّل schema/${LEDGER_TABLE}.sql مرة واحدة من D1 Console (ecommoda-dev-logs)`);
+  }
+
   // ③ شوبيفاي + الصلاحيات + **تعريف الميتافيلد الحيّ**
   try {
     assertEnv(env, 'shopify');
@@ -1201,6 +1597,13 @@ async function handleDiag(env, request) {
     //    شوبيفاي بتخفي أي أوردر أقدم من ٦٠ يوم عن تطبيق مالوش
     //    `read_all_orders`، والرسالة اللي بتطلع وقتها «الأوردر مش موجود» —
     //    وهي **كاذبة تمامًا**.
+    // 🔴 v1.5.0 — قطع مرتجع S2 بتتقرا من `returns` (محتاجة read_returns).
+    //    من غيرها `order_items` بيرمي على كل مرتجع S2 والطرد مايتسلّمش.
+    push(scopes.includes('read_returns'), 'صلاحية read_returns',
+         scopes.includes('read_returns') ? 'موجودة — قطع مرتجعات S2 مقروءة'
+           : 'ناقصة — قطع مرتجعات S2 (returnLineItems) مش هتتقرا والاستلام هيفشل',
+         'Custom App → Configuration → Admin API access scopes → read_returns');
+
     push(scopes.includes('read_all_orders'), 'صلاحية read_all_orders',
          scopes.includes('read_all_orders')
            ? 'موجودة — الأوردرات الأقدم من ٦٠ يوم مقروءة'
@@ -1310,6 +1713,15 @@ export default {
       if (action === 'scan') {
         if (request.method !== 'POST') return json({ error: 'POST required' }, 405, request);
         return await handleScan(env, request);
+      }
+
+      // ─── §RECEIVE (v1.5.0) — الاستلام قطعة قطعة + دفتر القطع الراجعة ───
+      if (action === 'get_return_items') return await handleReturnItems(env, request);
+      if (action === 'order_items' || action === 'receive_order' || action === 'receive_item') {
+        if (request.method !== 'POST') return json({ error: 'POST required' }, 405, request);
+        if (action === 'order_items')   return await handleOrderItems(env, request);
+        if (action === 'receive_order') return await handleReceiveOrder(env, request);
+        return await handleReceiveItem(env, request);
       }
 
       // ─── §LOG-ENDPOINTS ───────────────────────────────────────
