@@ -4,6 +4,9 @@
 --
 -- 🔴 بيتنفّذ مرة واحدة من D1 Console قبل نشر الـ Workers.
 --    `IF NOT EXISTS` بيخلّي إعادة التشغيل آمنة.
+--    ⛔ **ماتلزقش الملف ده في D1 Console** — الكونسول بيحوّل اللصق لسطر واحد،
+--    فأول تعليق `--` بيبلع باقي الأمر كله (`incomplete input: SQLITE_ERROR`).
+--    الصق **`warehouse_return_items.console.sql`** (سطر واحد بلا تعليقات · نفس المخطط بالحرف).
 --
 -- الكُتّاب (عقد — أي تغيير في عمود هنا يتعمل في الريبوهين في نفس التمريرة):
 --   ① partial-delivery-worker              ← سطر `pending` لكل قطعة اتشالت (source = partial_delivery)

@@ -387,7 +387,7 @@ const ALLOWED_ORIGINS = ['https://ecommoda-dev.github.io'];
 | ② | ربط Workers Builds على الريبو ده (`main`) | أي push مابينشرش |
 | ③ | **`WORKER_SECRET` = قيمة مجموعة `warehouse_ops`** → **Promote** | كل نداء `401` |
 | ④ | `CLIENT_ID` + `CLIENT_SECRET` → **Promote** | OAuth بيفشل والطابور بيقع |
-| ⓪ | 🔴 **(v1.5.0) تشغيل `schema/warehouse_return_items.sql` في D1 Console** (`ecommoda-dev-logs`) — **قبل** نشر الـ Worker ده و`partial-delivery-worker` | `get_return_items` بيرجع `500` بيقول الجدول مش موجود، و`receive_order` بيرجع `warning` (العهدة اتكتبت والدفتر لأ) |
+| ⓪ | 🔴 **(v1.5.0) لزق `schema/warehouse_return_items.console.sql` (سطر واحد) في D1 Console** — ⛔ مش الملف المتعلّق: الكونسول بيحوّل اللصق لسطر واحد فأول `--` بيبلع الباقي (`incomplete input`) (`ecommoda-dev-logs`) — **قبل** نشر الـ Worker ده و`partial-delivery-worker` | `get_return_items` بيرجع `500` بيقول الجدول مش موجود، و`receive_order` بيرجع `warning` (العهدة اتكتبت والدفتر لأ) |
 | ⑤ | تسجيل الأداة في **جدول كُتّاب `metafields_change`** في `ecommoda-constants` (§7 · `references/d1-history.md`) — ومعاه انحراف `sourceTool` | جرد بيعدّ الصف ده كأداة واحدة **بيغلط**، وجرد بيدوّر على `extra.source` **بيرجّع صفر** |
 
 > 🔴 **③ أهم واحدة فيهم، والفخّ إن `WORKER_SECRET` هنا مش قيمة فريدة.** الهب
