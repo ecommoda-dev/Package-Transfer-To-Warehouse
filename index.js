@@ -6,6 +6,11 @@
 // skills: worker-builder v3.10.0 · constants v3.1.0 · order-lifecycle v1.8.0
 //         · shopify-graphql-helper v1.1.0 · html-builder v6.6.0 — 22-10-2026
 //
+// 🔴 **v1.10.0 (25-10-2026 · طلب أحمد) — تابين جداد: «أوردرات معدّلة» و«تحويل بوسطة»**
+//    (`§EDITED` تحت): endpoint جديد `get_ready_edited` (استعلام **مشترك** للتابين) و`mode`
+//    في `scan` (`returned` | `edited` | `edited_bosta`). ⚠️ `get_ready_to_warehouse` و
+//    `order_items`/`receive_order` (mode = returned بس) **ما اتغيّروش**.
+//
 // 🔴 **v1.5.0 (22-10-2026 · طلب أحمد) — الاستلام قطعة قطعة + دفتر القطع
 //    الراجعة** (`§RECEIVE` تحت): أربع endpoints جداد (`order_items` ·
 //    `receive_order` · `get_return_items` · `receive_item`) وجدول D1 جديد
@@ -45,7 +50,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.9.0';
+const WORKER_VERSION = '1.10.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -73,6 +78,24 @@ const S2_STATUS = {
 //       هناك بيقفل الأداة دي بالكامل **من غير أي خطأ**.
 const S1_ELIGIBLE = new Set([S1_STATUS.RETURNED, S1_STATUS.CANCELLED]);
 const S2_ELIGIBLE = new Set([S2_STATUS.RETURNED]);
+
+// ─── §EDITED::constants — تابين «أوردرات معدّلة» و«تحويل بوسطة» (v1.10.0 · طلب أحمد 25-10-2026) ───
+// 🔴 **الطرد هنا خارج مش راجع**: أوردر اتطبع واتغلّف وراح المكتب، وبعدين اتعدّل (`Confirmed + Edit`)
+//    أو رجع `Confirmed` / S2 `Confirmed + EXCHANGE` — فالطرد اللي في المكتب بمحتوى قديم ولازم يرجع
+//    المخزن يتغلّف من جديد. ولسه الفعل واحد: يكتب `Warehouse`.
+// ⚠️ **وشرط التغليف بميتافيلد الماكينة بتاعتها** (`s1_…` لـS1 و`s2_…` لـS2) — عكس تاب المرتجعات:
+//    طرد S2 الخارج (الاستبدال) هو اللي اتغلّف في دورة S2. ⛔ ممنوع نسخ `packedAtS1` على الماكينتين.
+// ⚠️ **تحويل بوسطة** = نفس الشروط ماعدا: المندوب `Bosta` والزون `Other_Regions` (الأوردر اتغلّف لمندوب
+//    وراح المكتب وبعدين اتحوّل لبوسطة). بوسطة بره نطاق تاب المرتجعات والأوردرات المعدّلة.
+const S1_EDITED = new Set([S1_STATUS.CONFIRMED, S1_STATUS.CONFIRMED_EDIT]);
+const S2_EDITED = new Set([S2_STATUS.CONFIRMED_EXCHANGE]);
+const MODE = { RETURNED: 'returned', EDITED: 'edited', EDITED_BOSTA: 'edited_bosta' };
+const BOSTA_ZONE = 'Other_Regions';
+// mode مجهول = `returned` (سلوك الصفحات القديمة بالحرف) — مش رفض.
+function parseMode(body) {
+  const m = String(body?.mode || '').trim();
+  return (m === MODE.EDITED || m === MODE.EDITED_BOSTA) ? m : MODE.RETURNED;
+}
 
 // ─── §CONSTANTS::whereabouts ───
 // 🔴 الشكل `single_line_text_field` (Choice list) — و`metafieldsSet` بترفض
@@ -725,11 +748,11 @@ function shapeOrder(o) {
   };
 }
 
-async function fetchStep1Page(env, token, q, opName, costLog) {
+async function fetchStep1Page(env, token, q, opName, costLog, query = STEP1_QUERY) {
   const out = [];
   let after = null, pages = 0, truncated = false;
   while (pages < STEP1_MAX_PAGES) {
-    const data = await shopifyGQL(env, token, STEP1_QUERY,
+    const data = await shopifyGQL(env, token, query,
       { q, after, n: STEP1_PAGE_SIZE }, opName, costLog);
     const conn = data.data?.orders;
     if (!conn) throw new Error(`${opName}: رد شوبيفاي بلا \`orders\``);
@@ -947,6 +970,104 @@ async function handleReadyQueue(env, request) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// §EDITED — طابور «أوردرات معدّلة» + «تحويل بوسطة» (v1.10.0 · طلب أحمد 25-10-2026)
+// ══════════════════════════════════════════════════════════════
+// 🔴 **استعلام واحد مشترك للتابين** — المصدر واحد (حالات عابرة: `Confirmed` · `Confirmed + Edit` ·
+//    S2 `Confirmed + EXCHANGE`)، والفرق (المندوب/الزون) فلتر عرض في `ecoEditedGate` بالهب. استعلامين
+//    كانوا هيضاعفوا تكلفة شوبيفاي لنفس الرد. ⛔ ومنفصل عن `get_ready_to_warehouse` بقرار: حالاته
+//    نهائية وبتتراكم (آلاف)، وده عشرات — دمجهم بيربط فشلهم وبيخلط `truncated`.
+// ⚠️ **فلتر `query` على الميتافيلد ممكن يلقط أكتر من المطلوب** (مثلاً `WhatsApp-Confirmed`) — فبنفلتر
+//    بالقيمة الحرفية في الكود (`S1_EDITED`/`S2_EDITED`)، والاستعلام بس بيضيّق النطاق.
+// ⚠️ **التمريرة ١ فيها وقتَي التغليف كمان** (خفيف) عشان نستبعد غير المتغلّف قبل التفاصيل الكاملة.
+// ⚠️ **والعهدة `Office` بس في الطابور** (نفس قرار المرتجعات) — فلتر عرض، `evaluateEdited` بيقبل الباقي.
+const EDITED_STEP1_FIELDS = `
+  id
+  legacyResourceId
+  name
+  cancelledAt
+  s1: metafield(namespace: "custom", key: "manual_status") { value }
+  s2: metafield(namespace: "custom", key: "status_2_r_e") { value }
+  p1: metafield(namespace: "custom", key: "s1_packing_date_time") { value }
+  p2: metafield(namespace: "custom", key: "s2_packing_date_time") { value }
+  w1: metafield(namespace: "custom", key: "package_whereabouts_s1") { value }
+  w2: metafield(namespace: "custom", key: "package_whereabouts_s2") { value }
+`;
+const EDITED_STEP1_QUERY = `
+query EditedStep1($q: String!, $after: String, $n: Int!) {
+  orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true, after: $after) {
+    nodes { ${EDITED_STEP1_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+// أولوية الماكينة زي `evaluateEdited`: S1 الأول، وإلا S2. الملغي مستبعَد (شغل تاب المرتجعات).
+function mergeEditedStep1(nodes) {
+  const seen = new Set();
+  const survivors = [];
+  for (const n of nodes) {
+    const id = n.legacyResourceId;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (n.cancelledAt) continue;
+    const s1 = n.s1?.value || '', s2 = n.s2?.value || '';
+    const machine = S1_EDITED.has(s1) ? 's1' : (S2_EDITED.has(s2) ? 's2' : null);
+    if (!machine) continue;
+    const packed = machine === 's1' ? n.p1?.value : n.p2?.value;
+    if (!packed) continue;
+    const wa = machine === 's1' ? n.w1?.value : n.w2?.value;
+    if (wa === WA_VALUES.OFFICE) survivors.push(n.id);
+  }
+  return survivors;
+}
+
+async function handleEditedQueue(env, request) {
+  assertEnv(env, 'shopify');
+  const token = await getAccessToken(env);
+  const costLog = [];
+  const ordersSince = computeOrdersSince();
+  const floor = ` AND created_at:>=${ordersSince}`;
+
+  const [s1Confirmed, s1Edit, s2Exchange] = await Promise.all([
+    fetchStep1Page(env, token, `metafields.custom.manual_status:'${S1_STATUS.CONFIRMED}'${floor}`,
+                   'editedStep1_s1Confirmed', costLog, EDITED_STEP1_QUERY),
+    fetchStep1Page(env, token, `metafields.custom.manual_status:'${S1_STATUS.CONFIRMED_EDIT}'${floor}`,
+                   'editedStep1_s1Edit', costLog, EDITED_STEP1_QUERY),
+    fetchStep1Page(env, token, `metafields.custom.status_2_r_e:'${S2_STATUS.CONFIRMED_EXCHANGE}'${floor}`,
+                   'editedStep1_s2Exchange', costLog, EDITED_STEP1_QUERY),
+  ]);
+
+  const candidateGids = mergeEditedStep1([...s1Confirmed.nodes, ...s1Edit.nodes, ...s2Exchange.nodes]);
+  const step1Truncated = s1Confirmed.truncated || s1Edit.truncated || s2Exchange.truncated;
+  const ids = candidateGids.slice(0, STEP2_MAX_IDS);
+  const step2Truncated = candidateGids.length > STEP2_MAX_IDS;
+  const detailNodes = ids.length ? await fetchStep2Batch(env, token, ids, costLog) : [];
+
+  const byId = new Map();
+  for (const n of detailNodes) {
+    const s = shapeOrder(n);
+    if (s.orderId) byId.set(s.orderId, s);
+  }
+  const sum = pre => costLog.filter(c => c.op.startsWith(pre)).reduce((t, c) => t + (c.actual || 0), 0);
+
+  return json({
+    ok: true,
+    orders: [...byId.values()],
+    truncated: step1Truncated || step2Truncated,
+    ordersSince,
+    fetchedAt: new Date().toISOString(),
+    queryCost: {
+      step1Calls: costLog.filter(c => c.op.startsWith('editedStep1')).length,
+      step1ActualTotal: sum('editedStep1'),
+      step2Calls: costLog.filter(c => c.op === 'warehouseStep2').length,
+      step2ActualTotal: sum('warehouseStep2'),
+      candidatesAfterStep1: candidateGids.length,
+      detailsFetched: detailNodes.length,
+      step1Detail: [s1Confirmed, s1Edit, s2Exchange].map(r => ({ op: r.op, pages: r.pages, truncated: r.truncated })),
+    },
+  }, 200, request);
+}
+
+// ══════════════════════════════════════════════════════════════
 // §SCAN — سكان باركود الأوردر → كتابة `Warehouse`
 // ══════════════════════════════════════════════════════════════
 
@@ -997,7 +1118,8 @@ async function resolveOrder(env, token, code) {
 // 🔴 **الترتيب هنا مقلوب عن أداة المكتب عن قصد.** هناك الإلغاء أول حارس
 //    بيرفض؛ هنا الإلغاء **شرط أهلية**، فالترتيب بيبدأ بالنطاق (بوسطة/زون)
 //    وبعده الحالة. ⛔ أي نسخ لحارس الإلغاء من هناك بيقفل الأداة دي بالكامل.
-function evaluate(o) {
+function evaluate(o, mode = MODE.RETURNED) {
+  if (mode !== MODE.RETURNED) return evaluateEdited(o, mode);
   const warnings = [];
 
   // ① خارج النطاق — بوسطة
@@ -1086,6 +1208,74 @@ function evaluate(o) {
   return { level: 'ok', code: 'ok', machine, warnings: [] };
 }
 
+// ─── §EDITED::evaluate — الحكم في تابَي «أوردرات معدّلة» و«تحويل بوسطة» (v1.10.0) ───
+// 🔴 نفس هيكل `evaluate` بالظبط، بس الحالة المؤهلة `Confirmed`/`Confirmed + Edit` (S1) و
+//    `Confirmed + EXCHANGE` (S2)، **والملغي مرفوض** (ده شغل تاب المرتجعات)، والتغليف بميتافيلد
+//    الماكينة. ⛔ نفس الشروط في `ecoEditedGate` (`shared/gates.js` بالهب) في نفس التمريرة (درس R1).
+function evaluateEdited(o, mode) {
+  const warnings = [];
+  const bostaTab = mode === MODE.EDITED_BOSTA;
+  const isBosta  = o.courier === COURIER_BOSTA;
+
+  // ① النطاق — بوسطة / الزون
+  if (bostaTab) {
+    if (!isBosta)
+      return { level: 'blocked', code: 'not_bosta', machine: null, mode,
+        message: `المندوب «${o.courier || 'فاضي'}» مش Bosta — الأوردر ده مكانه تاب «أوردرات معدّلة»` };
+    if (o.zone !== BOSTA_ZONE)
+      return { level: 'blocked', code: 'zone', machine: null, mode,
+        message: `الزون «${o.zone || 'فاضي'}» مش ${BOSTA_ZONE} — تاب «تحويل بوسطة» للأوردرات اللي زونها اتحوّل لبوسطة` };
+  } else {
+    if (isBosta || o.zone === BOSTA_ZONE)
+      return { level: 'blocked', code: 'bosta', machine: null, mode,
+        message: 'الأوردر ده بوسطة — مكانه تاب «تحويل بوسطة»' };
+    if (!ZONE_IN_SCOPE.has(o.zone || ''))
+      return { level: 'blocked', code: 'zone', machine: null, mode,
+        message: `الزون «${o.zone || 'فاضي'}» مش من نطاق الأداة — النطاق: قاهرة+جيزة أو شو روم` };
+  }
+
+  // ② الملغي — شغل تاب «مرتجعات + لواغي»
+  if (o.cancelledAt || S1_ELIGIBLE.has(o.s1 || ''))
+    return { level: 'blocked', code: 'cancelled', machine: null, mode,
+      message: 'الأوردر ده ملغي أو مرتجع — مكانه تاب «مرتجعات + لواغي»' };
+
+  // ③ الماكينة — S1 الأول
+  const s1Eligible = S1_EDITED.has(o.s1 || '');
+  const s2Eligible = S2_EDITED.has(o.s2 || '');
+  const machine = s1Eligible ? 's1' : (s2Eligible ? 's2' : null);
+  if (!machine)
+    return { level: 'blocked', code: 'status', machine: null, mode,
+      message: `الأوردر ده مش معدّل (S1 = ${o.s1 || '—'} · S2 = ${o.s2 || '—'}) — `
+             + 'المطلوب Confirmed / Confirmed + Edit (S1) أو Confirmed + EXCHANGE (S2)' };
+
+  // ④ متغلّف فعلاً — بميتافيلد الماكينة بتاعتها (الطرد الخارج)
+  if (!(machine === 's1' ? o.packedAtS1 : o.packedAtS2))
+    return { level: 'blocked', code: 'not_packed', machine, mode,
+      message: 'الأوردر ده ما اتغلّفش — مفيش طرد في المكتب يرجع' };
+
+  // ⑤ العهدة الحالية
+  const cur = machine === 's1' ? o.whereaboutsS1 : o.whereaboutsS2;
+  if (cur === WA_VALUES.WAREHOUSE)
+    return { level: 'already', code: 'already_warehouse', machine, mode,
+      message: 'الطرد ده مسجّل في المخزن خلاص — مفيش حاجة كانت مطلوبة' };
+  if (cur && cur !== WA_VALUES.OFFICE && cur !== WA_VALUES.COURIER)
+    warnings.push(`عهدة الطرد فيها قيمة غير معروفة: «${cur}»`);
+
+  // ⑥ الحالات الشاذة — بإقرار
+  if (s1Eligible && s2Eligible)
+    warnings.push('الشحنة الأصلية ودورة الاستبدال **الاتنين** معدّلين — هنسجّل على الشحنة الأصلية (S1). '
+                + 'لو الطرد اللي في إيدك بتاع الاستبدال، اسأل الأول.');
+  const S1_KNOWN = new Set(Object.values(S1_STATUS));
+  const S2_KNOWN = new Set(Object.values(S2_STATUS));
+  if (o.s1 && !S1_KNOWN.has(o.s1)) warnings.push(`حالة S1 «${o.s1}» مش من القايمة المعتمدة`);
+  if (o.s2 && !S2_KNOWN.has(o.s2)) warnings.push(`حالة S2 «${o.s2}» مش من القايمة المعتمدة`);
+
+  if (warnings.length)
+    return { level: 'warn', code: 'anomaly', machine, mode, warnings,
+      message: 'الأوردر مؤهل، بس فيه حاجة محتاجة مراجعة قبل التسجيل' };
+  return { level: 'ok', code: 'ok', machine, mode, warnings: [] };
+}
+
 // ─── §SCAN::writeWhereabouts ───
 // التلات فحوصات (worker-builder Step 5A ②): top-level (جوّه `shopifyGQL`) →
 // `userErrors` → **تأكيد الـ payload**. الفحص التالت هو اللي بيتنسى:
@@ -1126,6 +1316,7 @@ async function handleScan(env, request) {
   const code     = String(body.code || '').trim();
   const employee = body.employee ? String(body.employee) : null;
   const ack      = body.ack === true;
+  const mode     = parseMode(body);
 
   if (!code) return json({ ok: false, error: 'مفيش باركود في الطلب' }, 400, request);
 
@@ -1140,13 +1331,13 @@ async function handleScan(env, request) {
       tool: TOOL_NAME, type: 'rejected', employee,
       notes: reason,
       extra: { sourceTool: SOURCE_TOOL, result: 'rejected', stage: 'lookup',
-               code: 'not_found', scanned: code },
+               code: 'not_found', scanned: code, mode },
     });
     return json({ ok: true, result: 'rejected', code: 'not_found',
       message: reason, scanned: code, ...logged }, 200, request);
   }
 
-  const v = evaluate(order);
+  const v = evaluate(order, mode);
 
   // ② محتاج إقرار ولسه ما اقرّش — مفيش كتابة ومفيش صف
   if (v.level === 'warn' && !ack) {
@@ -1164,7 +1355,7 @@ async function handleScan(env, request) {
       valueBefore: currentWhereabouts(order, v.machine), valueAfter: null,
       notes: v.message,
       extra: { sourceTool: SOURCE_TOOL, result, stage: 'lookup', code: v.code,
-               machine: machineLabel(v.machine),
+               machine: machineLabel(v.machine), mode,
                zone: order.zone, courier: order.courier, s1: order.s1, s2: order.s2 },
     });
     return json({ ok: true, result, code: v.code, message: v.message,
@@ -1189,11 +1380,11 @@ async function handleScan(env, request) {
     notes: error || (v.warnings || []).join(' · ') || null,
     extra: {
       sourceTool: SOURCE_TOOL,
-      result, stage: 'write', machine: machineLabel(v.machine),
+      result, stage: 'write', machine: machineLabel(v.machine), mode,
       zone: order.zone, courier: order.courier, s1: order.s1, s2: order.s2,
       cancelledAt: order.cancelledAt || undefined,
-      packedAt: packedAtOf(order),
-      packedBy: packedByOf(order),
+      packedAt: packedAtOf(order, v),
+      packedBy: packedByOf(order, v),
       acknowledged: ack || undefined,
       warnings: (v.warnings && v.warnings.length) ? v.warnings : undefined,
       cairoDate: cairoDate(),
@@ -1216,8 +1407,16 @@ async function handleScan(env, request) {
 //    (`s2_…` صح). ⛔ ممنوع الرجوع لـ`machine === 's1' ? …S1 : …S2` هنا.
 // ⚠️ ومش بنفرّق بين استرجاع واستبدال: `exchangeLineItems` الفاضي مش دليل
 //    إنها استرجاع (`ecommoda-order-lifecycle` قاعدة ٨).
-function packedAtOf(o)  { return o.packedAtS1 || null; }
-function packedByOf(o)  { return o.packedByS1 || null; }
+// ⚠️ **v1.10.0:** في تابَي المعدّلة (`v.mode !== returned`) الطرد **خارج** فالتغليف بميتافيلد
+//    الماكينة (`s2_…` لـS2) — عكس المرتجعات. بدون `v` = سلوك المرتجعات بالحرف.
+function packedAtOf(o, v)  {
+  if (v && v.mode && v.mode !== MODE.RETURNED && v.machine === 's2') return o.packedAtS2 || null;
+  return o.packedAtS1 || null;
+}
+function packedByOf(o, v)  {
+  if (v && v.mode && v.mode !== MODE.RETURNED && v.machine === 's2') return o.packedByS2 || null;
+  return o.packedByS1 || null;
+}
 
 function currentWhereabouts(o, machine) {
   if (!machine) return null;
@@ -1366,6 +1565,8 @@ async function handleOrderItems(env, request) {
   const code     = String(body.code || '').trim();
   const employee = body.employee ? String(body.employee) : null;
   const ack      = body.ack === true;
+  if (parseMode(body) !== MODE.RETURNED)
+    return json({ ok: false, error: 'الاستلام قطعة قطعة لتاب المرتجعات بس — التابين التانيين بيستخدموا scan' }, 400, request);
   if (!code) return json({ ok: false, error: 'مفيش باركود في الطلب' }, 400, request);
 
   assertEnv(env, 'shopify');
@@ -1423,6 +1624,8 @@ async function handleReceiveOrder(env, request) {
   const ack      = body.ack === true;
   const scanned  = Array.isArray(body.scanned) ? body.scanned : [];
   const missing  = Array.isArray(body.missing) ? body.missing.map(String) : [];
+  if (parseMode(body) !== MODE.RETURNED)
+    return json({ ok: false, error: 'الاستلام قطعة قطعة لتاب المرتجعات بس — التابين التانيين بيستخدموا scan' }, 400, request);
   if (!code) return json({ ok: false, error: 'مفيش باركود في الطلب' }, 400, request);
 
   assertEnv(env, 'shopify');
@@ -1807,6 +2010,7 @@ export default {
 
       // ─── §QUEUE ───────────────────────────────────────────────
       if (action === 'get_ready_to_warehouse') return await handleReadyQueue(env, request);
+      if (action === 'get_ready_edited')       return await handleEditedQueue(env, request);   // v1.10.0 — مشترك لتابَي المعدّلة وتحويل بوسطة
 
       // ─── §SCAN ────────────────────────────────────────────────
       if (action === 'scan') {

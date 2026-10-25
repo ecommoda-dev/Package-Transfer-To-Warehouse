@@ -2,13 +2,13 @@
 
 # مرتجعات + لواغي المكتب — Package Transfer To Warehouse (`Package-Transfer-To-Warehouse`)
 
-![version](https://img.shields.io/badge/worker-v1.9.0-blue)
+![version](https://img.shields.io/badge/worker-v1.10.0-blue)
 
 **بتعمل إيه:** بتسجّل رجوع الطرد **للمخزن**. الموظف بيسكن باركود الأوردر
 المرتجع أو الملغي، والأداة بتكتب `custom.package_whereabouts_s1` (أو `_s2`
 لدورة الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 **مين بيستخدمها:** المخزن
-**الإصدار:** `1.9.0` (`WORKER_VERSION` في `index.js`)
+**الإصدار:** `1.10.0` (`WORKER_VERSION` في `index.js`)
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
@@ -21,6 +21,26 @@
 > المسجّلة في `ecommoda-order-lifecycle` → `references/package-whereabouts.md`
 > §5، واللي `Package-Transfer-To-Office/CLAUDE.md` سابها بند مفتوح صريح:
 > «الطرد اللي عهدته `Office` والأوردر ملغي/مرتجع → سكان يرجّعه `Warehouse`».
+
+## 🔴 v1.10.0 — تابين جداد: «أوردرات معدّلة» و«تحويل بوسطة» (طلب أحمد 25-10-2026)
+
+الطرد هنا **خارج** مش راجع: أوردر اتطبع واتغلّف وراح المكتب، وبعدين اتعدّل (`Confirmed + Edit`) أو رجع `Confirmed` / S2 `Confirmed + EXCHANGE` — فالطرد اللي في المكتب بمحتوى قديم ولازم يرجع المخزن يتغلّف من جديد. الفعل نفسه: السكان يكتب `Warehouse`.
+
+| | `mode = edited` | `mode = edited_bosta` | `mode = returned` (الأصل) |
+|---|---|---|---|
+| الحالة | S1 `Confirmed`/`Confirmed + Edit` · S2 `Confirmed + EXCHANGE` | نفسها | `Returned`/`Cancelled` · S2 `Returned` |
+| المندوب / الزون | مش Bosta · قاهرة+جيزة أو شو روم | **Bosta** · **`Other_Regions`** | زي `edited` |
+| الملغي | 🔴 **مرفوض** (شغل تاب المرتجعات) | مرفوض | شرط أهلية |
+| التغليف | `s1_…` لـS1 · 🔴 **`s2_…` لـS2** (الطرد خارج) | نفسه | `s1_…` على الماكينتين |
+| طابور العهدة | `Office` بس | `Office` بس | `Office` بس |
+
+- 🔴 **استعلام الطابور مشترك للتابين:** `?action=get_ready_edited` (تمريرة ١ بـ`manual_status:Confirmed` · `manual_status:'Confirmed + Edit'` · `status_2_r_e:'Confirmed + EXCHANGE'` + أرضية `created_at` ٢٥٠ يوم، وتمريرة ٢ `nodes(ids:)` للمرشّحين). المندوب/الزون فلتر عرض في `ecoEditedGate` (الهب). ⛔ **منفصل عن `get_ready_to_warehouse`** بقرار: حالاته نهائية وبتتراكم، وده عشرات.
+- ⚠️ فلتر `query` على الميتافيلد ممكن يلقط أكتر من المطلوب (`WhatsApp-Confirmed`…) فالقيمة بتتفلتر **حرفيًا في الكود** (`mergeEditedStep1`). **لسه محتاج قياس حي أول مرة.**
+- `scan` بياخد `mode` (مجهول = `returned`). ⚠️ `order_items`/`receive_order` **تاب المرتجعات بس** (400 لأي mode تاني) — قطع الطرد المعدّل مالهاش مصدر في شوبيفاي، فالتابين الجداد **بيكتبوا عبر `scan` مباشرة** من غير سكان قطع ومن غير سطور دفتر.
+- ⛔ نفس القاعدة في `evaluateEdited` هنا و`ecoEditedGate` في `shared/gates.js` بالهب — **في نفس التمريرة** (درس R1).
+- اللوج: `extra.mode` على صفوف `scan`، صفر قيمة `type` جديدة. بوسطة هنا استثناء مقصود من «بوسطة بره النطاق» (الطرد اتغلّف لمندوب وراح المكتب وبعدين اتحوّل).
+- ✅ مقاس: `evaluateEdited` و`mergeEditedStep1` على حالات وهمية (١٢ + ٤ حالات). ⚠️ ما اتجرّبش على شوبيفاي الحقيقي.
+- 🔴 **Promote مطلوب** — والهب `warehouse.min` → `1.10.0`.
 
 ## الروابط
 
