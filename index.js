@@ -45,7 +45,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.7.0';
+const WORKER_VERSION = '1.8.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -1275,10 +1275,10 @@ query OrderItemsS1($id: ID!) {
   order(id: $id) {
     id
     cancelledAt
-    lineItems(first: 50) { nodes { id sku name currentQuantity variant { id barcode } } }
+    lineItems(first: 50) { nodes { id sku name currentQuantity image { url } variant { id barcode image { url } } } }
     refunds {
       createdAt
-      refundLineItems(first: 50) { nodes { quantity lineItem { id sku name variant { id barcode } } } }
+      refundLineItems(first: 50) { nodes { quantity lineItem { id sku name image { url } variant { id barcode image { url } } } } }
     }
   }
 }`;
@@ -1290,7 +1290,7 @@ query OrderItemsS2($id: ID!) {
       nodes {
         id status createdAt
         returnLineItems(first: 50) {
-          nodes { quantity ... on ReturnLineItem { fulfillmentLineItem { lineItem { id sku name variant { id barcode } } } } }
+          nodes { quantity ... on ReturnLineItem { fulfillmentLineItem { lineItem { id sku name image { url } variant { id barcode image { url } } } } } }
         }
       }
     }
@@ -1302,7 +1302,8 @@ function addItem(map, li, qty) {
   const cur = map.get(li.id);
   if (cur) { cur.qty += qty; return; }
   map.set(li.id, { lineItemId: li.id, sku: li.sku || null, title: li.name || null,
-                   variantId: li.variant?.id || null, barcode: li.variant?.barcode || null, qty });
+                   variantId: li.variant?.id || null, barcode: li.variant?.barcode || null,
+                   imageUrl: li.image?.url || li.variant?.image?.url || null, qty });
 }
 
 // ─── §RECEIVE::fetchOrderItems — قطع الطرد الفعلية حسب الماكينة ───
