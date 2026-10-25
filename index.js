@@ -45,7 +45,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.8.0';
+const WORKER_VERSION = '1.9.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -1522,6 +1522,8 @@ async function handleReceiveOrder(env, request) {
       warnings: warnings.length ? warnings : undefined,
       itemByItem: true, itemsSource, cycleKey: cycleKey || undefined,
       units: units.length, unitsMissing: missingUnits.length || undefined,
+      // 1.9.0: تفاصيل المنتجات في السجل — SKU وعدد القطع (وعدد الناقص) لكل صنف. الواجهة بتعرضها في تاب «سجل العمليات».
+      items: unitsSummary(units, missing),
       ledger: ledger || undefined,
       cairoDate: cairoDate(),
     },
@@ -1530,6 +1532,19 @@ async function handleReceiveOrder(env, request) {
   return json({ ok: !error, result, code: error ? 'write_failed' : 'written', message: error || null,
     order, machine: v.machine, warnings, valueBefore: before, valueAfter: wrote,
     units: units.length, missing: missingUnits.length, ledger, ...logged }, 200, request);
+}
+
+// 1.9.0 — تجميع قطع الاستلام حسب الـ SKU للسجل: [{ sku, qty, missing? }]
+function unitsSummary(units, missing) {
+  const m = new Map();
+  for (const u of units) {
+    const k = u.sku || u.title || '—';
+    const e = m.get(k) || { sku: k, qty: 0, missing: 0 };
+    e.qty++;
+    if (missing.includes(u.key)) e.missing++;
+    m.set(k, e);
+  }
+  return [...m.values()].map(e => e.missing ? e : { sku: e.sku, qty: e.qty });
 }
 
 // ─── §RECEIVE::handleReturnItems — القطع المستنية + الناقصة ───
