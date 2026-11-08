@@ -6,6 +6,12 @@
 // skills: worker-builder v3.10.0 · constants v3.1.0 · order-lifecycle v1.8.0
 //         · shopify-graphql-helper v1.1.0 · html-builder v6.6.0 — 22-10-2026
 //
+// 🔴 **v1.11.0 (08-11-2026 · طلب أحمد) — `receive_item` بقى بيسيب صف في السجل**
+//    (`§RECEIVE::handleReceiveItem`): قبل كده استلام القطعة السايبة كان في الدفتر بس ومش
+//    بيظهر في تاب «سجل العمليات» (واقعة #64511). دلوقتي كل نداء = صف واحد (`update` على
+//    النجاح · `rejected` على already/not_found/تعارض)، وصفر قيمة `type` جديدة. عقد الرد
+//    ما اتغيّرش (اتضاف `logged` بس).
+//
 // 🔴 **v1.10.0 (25-10-2026 · طلب أحمد) — تابين جداد: «أوردرات معدّلة» و«تحويل بوسطة»**
 //    (`§EDITED` تحت): endpoint جديد `get_ready_edited` (استعلام **مشترك** للتابين) و`mode`
 //    في `scan` (`returned` | `edited` | `edited_bosta`). ⚠️ `get_ready_to_warehouse` و
@@ -50,7 +56,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.10.0';
+const WORKER_VERSION = '1.11.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -1780,12 +1786,35 @@ async function handleReturnItems(env, request) {
 // 🔴 **بالباركود: الأقدم أولاً** (قرار أحمد 22-10-2026) — `pending` قبل `missing`،
 //    وبعدها الأقدم تسجيلاً. والـ UPDATE مشروط بالحالة (`status IN (…)`) فقطعة
 //    اتقفلت من جهاز تاني في نفس اللحظة مابتتقفلش مرتين.
+// 🔴 **(1.11.0 · طلب أحمد 08-11-2026) كل نداء بيسيب صف واحد في السجل** — قبل كده
+//    الاستلام السايب كان بيتكتب في الدفتر بس، فتاب «سجل العمليات» ماكانش بيبيّنه
+//    (واقعة #64511: القطعة اتسلّمت بسكان ومالهاش أي أثر في السجل). نفس قاعدة
+//    «كل سكانة بتسيب صف» بتاعة `scan`/`receive_order`:
+//      · نجاح          → `update` / `success`
+//      · already · not_found · تعارض → `rejected` (مع `extra.result` بالتفصيل)
+//    ⚠️ صفر قيمة `type` جديدة (`update`/`rejected` مسجّلتين). وفشل الكتابة في
+//    السجل **مايكسرش** الاستلام — القطعة اتقفلت فعلاً، فبيرجع `logged:false`.
 async function handleReceiveItem(env, request) {
   const body = await request.json().catch(() => ({}));
   const employee = body.employee ? String(body.employee) : null;
   const barcode  = String(body.barcode || '').replace(/\D/g, '');
   const id       = Number.isInteger(body.id) ? body.id : null;
   if (!barcode && !id) return json({ ok: false, error: 'مفيش باركود ولا id في الطلب' }, 400, request);
+
+  // صف السجل لنداء ما اتقفلش فيه قطعة (already / not_found / تعارض)
+  const logRejected = (result, code, message, row) => safeLog(env, {
+    tool: TOOL_NAME, type: 'rejected', employee,
+    orderId: row?.order_id || null, orderName: row?.order_name || null,
+    notes: message + (barcode ? ` — باركود ${barcode}` : ''),
+    extra: {
+      sourceTool: SOURCE_TOOL, result, stage: 'lookup', code,
+      machine: row?.machine || undefined,
+      looseItem: true, receiveMode: id ? 'manual' : 'scan',
+      scanned: barcode || undefined, ledgerId: row?.id || id || undefined,
+      items: row?.sku ? [{ sku: row.sku, qty: 1 }] : undefined,
+      cairoDate: cairoDate(),
+    },
+  });
 
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -1798,33 +1827,63 @@ async function handleReceiveItem(env, request) {
             LIMIT 1`).bind(barcode).first();
 
       if (!row || (id && row.status === 'received')) {
-        if (id && row) return json({ ok: true, result: 'already', message: 'القطعة دي اتسلّمت خلاص',
-          item: { id: row.id, orderName: row.order_name, sku: row.sku } }, 200, request);
-        if (id) return json({ ok: false, result: 'not_found', message: 'السطر ده مش موجود' }, 404, request);
+        if (id && row) {
+          const message = 'القطعة دي اتسلّمت خلاص';
+          const logged = await logRejected('already', 'already', message, row);
+          return json({ ok: true, result: 'already', message,
+            item: { id: row.id, orderName: row.order_name, sku: row.sku }, ...logged }, 200, request);
+        }
+        if (id) {
+          const message = 'السطر ده مش موجود';
+          const logged = await logRejected('rejected', 'not_found', message, null);
+          return json({ ok: false, result: 'not_found', message, ...logged }, 404, request);
+        }
         const done = await env.DB.prepare(`
           SELECT order_name, sku, received_at, received_by FROM ${LEDGER_TABLE}
           WHERE barcode = ? AND status = 'received' ORDER BY received_at DESC LIMIT 1`).bind(barcode).first();
-        return json({ ok: true, result: done ? 'already' : 'not_found', barcode,
-          message: done
-            ? `مفيش قطعة مستنية بالباركود ده — آخر قطعة بيه اتسلّمت خلاص (${done.order_name || '—'})`
-            : 'مفيش قطعة مستنية الاستلام بالباركود ده — لو ده طرد أوردر كامل، اسكن باركود الأوردر' }, 200, request);
+        const message = done
+          ? `مفيش قطعة مستنية بالباركود ده — آخر قطعة بيه اتسلّمت خلاص (${done.order_name || '—'})`
+          : 'مفيش قطعة مستنية الاستلام بالباركود ده — لو ده طرد أوردر كامل، اسكن باركود الأوردر';
+        const logged = await logRejected(done ? 'already' : 'rejected', done ? 'already' : 'not_found', message,
+          done ? { order_name: done.order_name, sku: done.sku } : null);   // آخر أوردر اتسلّمت قطعته — عشان البحث بالأوردر يلاقي الصف
+        return json({ ok: true, result: done ? 'already' : 'not_found', barcode, message, ...logged }, 200, request);
       }
 
       const now = new Date().toISOString();
+      const mode = id ? 'manual' : 'scan';
       const up = await env.DB.prepare(`
         UPDATE ${LEDGER_TABLE}
         SET status = 'received', received_at = ?, received_by = ?, receive_mode = ?
         WHERE id = ? AND status IN ('pending', 'missing')`)
-        .bind(now, employee, id ? 'manual' : 'scan', row.id).run();
+        .bind(now, employee, mode, row.id).run();
       if ((up?.meta?.changes || 0) === 1) {
+        // ✅ الأثر في السجل — بعد القفل الفعلي بس. `value_before/after` فاضيين
+        //    عن قصد: القطعة السايبة **مابتكتبش عهدة الطرد** (دي في `receive_order`).
+        const logged = await safeLog(env, {
+          tool: TOOL_NAME, type: 'update', employee,
+          orderId: row.order_id, orderName: row.order_name,
+          notes: `استلام قطعة سايبة (${mode === 'scan' ? 'سكان' : 'يدوي'}) — ${row.sku || row.title || '—'}`
+            + (row.status === 'missing' ? ' · كانت ناقصة' : ''),
+          extra: {
+            sourceTool: SOURCE_TOOL, result: 'success', stage: 'write',
+            machine: row.machine || undefined,
+            looseItem: true, receiveMode: mode, ledgerId: row.id,
+            ledgerSource: row.source, wasStatus: row.status,
+            scanned: barcode || row.barcode || undefined,
+            units: 1, items: [{ sku: row.sku || row.title || '—', qty: 1 }],
+            cairoDate: cairoDate(),
+          },
+        });
         return json({ ok: true, result: 'success', barcode: barcode || row.barcode,
           item: { id: row.id, source: row.source, orderId: row.order_id, orderName: row.order_name,
                   sku: row.sku, title: row.title, unitIndex: row.unit_index, wasStatus: row.status,
-                  receivedAt: now, receivedBy: employee } }, 200, request);
+                  receivedAt: now, receivedBy: employee }, ...logged }, 200, request);
       }
       // جهاز تاني قفل نفس السطر — جرّب السطر اللي بعده
     }
-    return json({ ok: false, error: 'تعارض مع جهاز تاني — اسكن القطعة تاني' }, 409, request);
+    const message = 'تعارض مع جهاز تاني — اسكن القطعة تاني';
+    const logged = await logRejected('rejected', 'conflict', message, null);
+    return json({ ok: false, error: message, ...logged }, 409, request);
   } catch (e) {
     return json({ ok: false, error: ledgerMissingMsg(e) }, 500, request);
   }
