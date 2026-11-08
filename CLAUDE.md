@@ -2,13 +2,13 @@
 
 # مرتجعات + لواغي المكتب — Package Transfer To Warehouse (`Package-Transfer-To-Warehouse`)
 
-![version](https://img.shields.io/badge/worker-v1.11.1-blue)
+![version](https://img.shields.io/badge/worker-v1.11.2-blue)
 
 **بتعمل إيه:** بتسجّل رجوع الطرد **للمخزن**. الموظف بيسكن باركود الأوردر
 المرتجع أو الملغي، والأداة بتكتب `custom.package_whereabouts_s1` (أو `_s2`
 لدورة الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 **مين بيستخدمها:** المخزن
-**الإصدار:** `1.11.1` (`WORKER_VERSION` في `index.js`)
+**الإصدار:** `1.11.2` (`WORKER_VERSION` في `index.js`)
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
@@ -21,6 +21,10 @@
 > المسجّلة في `ecommoda-order-lifecycle` → `references/package-whereabouts.md`
 > §5، واللي `Package-Transfer-To-Office/CLAUDE.md` سابها بند مفتوح صريح:
 > «الطرد اللي عهدته `Office` والأوردر ملغي/مرتجع → سكان يرجّعه `Warehouse`».
+
+## 🔴 v1.11.2 — الصيغة بقت «تسليم جزئي» (طلب أحمد 08-11-2026)
+
+ملاحظة صف النجاح في `receive_item` بقت **«تسليم جزئي — SKU»** (كانت «استلام جزئي — SKU» في `1.11.1`). لوج بس — صفر تغيير في الرد أو الكتابة أو `type`. ⚠️ صفوف D1 اللي اتكتبت قبل النشر (٤٢ backfill + ٧ من `1.11.0`) لسه بـ«استلام جزئي — …» — تتعدّل بـ`UPDATE` يدوي لو اتطلب. 🔴 **Promote مطلوب.**
 
 ## 🔴 v1.11.1 — صيغة ملاحظة صف `receive_item` + backfill (طلب أحمد 08-11-2026)
 
@@ -694,7 +698,7 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 08-11-2026 — `1.11.1` (صيغة «استلام جزئي» + backfill ٤٢ صف) ثم `1.11.0` (`receive_item` بيسيب صف في «سجل العمليات») ثم 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
+آخر تحديث: 08-11-2026 — `1.11.2` (صيغة «تسليم جزئي») ثم `1.11.1` (صيغة «استلام جزئي» + backfill ٤٢ صف) ثم `1.11.0` (`receive_item` بيسيب صف في «سجل العمليات») ثم 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
 `receive_order` · `get_return_items` · `receive_item` + دفتر D1
 `warehouse_return_items`. `scan` والطابور ما اتلمسوش)
 
