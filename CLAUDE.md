@@ -2,13 +2,13 @@
 
 # مرتجعات + لواغي المكتب — Package Transfer To Warehouse (`Package-Transfer-To-Warehouse`)
 
-![version](https://img.shields.io/badge/worker-v1.11.0-blue)
+![version](https://img.shields.io/badge/worker-v1.11.1-blue)
 
 **بتعمل إيه:** بتسجّل رجوع الطرد **للمخزن**. الموظف بيسكن باركود الأوردر
 المرتجع أو الملغي، والأداة بتكتب `custom.package_whereabouts_s1` (أو `_s2`
 لدورة الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 **مين بيستخدمها:** المخزن
-**الإصدار:** `1.11.0` (`WORKER_VERSION` في `index.js`)
+**الإصدار:** `1.11.1` (`WORKER_VERSION` في `index.js`)
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
@@ -21,6 +21,14 @@
 > المسجّلة في `ecommoda-order-lifecycle` → `references/package-whereabouts.md`
 > §5، واللي `Package-Transfer-To-Office/CLAUDE.md` سابها بند مفتوح صريح:
 > «الطرد اللي عهدته `Office` والأوردر ملغي/مرتجع → سكان يرجّعه `Warehouse`».
+
+## 🔴 v1.11.1 — صيغة ملاحظة صف `receive_item` + backfill (طلب أحمد 08-11-2026)
+
+- **الصيغة:** ملاحظة صف النجاح بقت **«استلام جزئي — SKU»** (كانت «استلام قطعة سايبة (سكان/يدوي) — SKU»). لوج بس — صفر تغيير في الرد أو الكتابة. ⚠️ طريقة الاستلام (سكان/يدوي) مابقتش في النص، لسه في `extra.receiveMode`.
+- **Backfill (اتنفّذ على D1 يدويًا 08-11-2026):** ٤٢ صف `update`/`success` لاستلامات القطع السايبة اللي حصلت من 22-10 لحد 08-11 (قبل `1.11.0`)، مبنيّين من `warehouse_return_items`. `timestamp` = `received_at` الحقيقي، و`extra.backfilled = true` + نفس مفاتيح `1.11.0`، والملاحظة بتنتهي بـ«· backfill». مقاس بعد الكتابة: ٤٢ صف / ٤٢ `ledgerId` مختلف / صفر قطعة ناقصة.
+- ⚠️ **٧ صفوف اتكتبت بين نشر `1.11.0` و`1.11.1`** ممكن تكون بالصيغة القديمة («قطعة سايبة»).
+- لو احتجت تمسح صفوف الـ backfill: `DELETE FROM logs WHERE tool='metafields_change' AND json_extract(extra,'$.sourceTool')='package_transfer_to_warehouse' AND json_extract(extra,'$.backfilled')=1;`
+- 🔴 **Promote مطلوب** بعد النشر.
 
 ## 🔴 v1.11.0 — `receive_item` بقى بيسيب صف في «سجل العمليات» (طلب أحمد 08-11-2026)
 
@@ -686,7 +694,7 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 08-11-2026 — `1.11.0` (`receive_item` بيسيب صف في «سجل العمليات») ثم 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
+آخر تحديث: 08-11-2026 — `1.11.1` (صيغة «استلام جزئي» + backfill ٤٢ صف) ثم `1.11.0` (`receive_item` بيسيب صف في «سجل العمليات») ثم 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
 `receive_order` · `get_return_items` · `receive_item` + دفتر D1
 `warehouse_return_items`. `scan` والطابور ما اتلمسوش)
 
