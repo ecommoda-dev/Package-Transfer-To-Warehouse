@@ -6,6 +6,8 @@
 // skills: worker-builder v3.10.0 · constants v3.1.0 · order-lifecycle v1.8.0
 //         · shopify-graphql-helper v1.1.0 · html-builder v6.6.0 — 22-10-2026
 //
+// 🔴 **v1.11.2 (08-11-2026 · طلب أحمد) — صيغة ملاحظة صف `receive_item` بقت «تسليم جزئي — SKU»** (كانت «استلام جزئي — SKU» في `1.11.1`). لوج بس.
+//
 // 🔴 **v1.11.1 (08-11-2026 · طلب أحمد) — صيغة ملاحظة صف `receive_item`:** «استلام جزئي — SKU» بدل «استلام قطعة سايبة (سكان/يدوي) — SKU».
 //    لوج بس: صفر تغيير في الرد أو الكتابة. طريقة الاستلام لسه في `extra.receiveMode`.
 //
@@ -59,7 +61,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.11.1';
+const WORKER_VERSION = '1.11.2';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -1865,7 +1867,7 @@ async function handleReceiveItem(env, request) {
         const logged = await safeLog(env, {
           tool: TOOL_NAME, type: 'update', employee,
           orderId: row.order_id, orderName: row.order_name,
-          notes: `استلام جزئي — ${row.sku || row.title || '—'}`   // 1.11.1: الصيغة المعتمدة. طريقة الاستلام (سكان/يدوي) في extra.receiveMode
+          notes: `تسليم جزئي — ${row.sku || row.title || '—'}`   // 1.11.2: الصيغة المعتمدة. طريقة الاستلام (سكان/يدوي) في extra.receiveMode
             + (row.status === 'missing' ? ' · كانت ناقصة' : ''),
           extra: {
             sourceTool: SOURCE_TOOL, result: 'success', stage: 'write',
