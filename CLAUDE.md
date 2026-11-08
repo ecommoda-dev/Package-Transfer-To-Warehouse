@@ -2,13 +2,13 @@
 
 # مرتجعات + لواغي المكتب — Package Transfer To Warehouse (`Package-Transfer-To-Warehouse`)
 
-![version](https://img.shields.io/badge/worker-v1.10.0-blue)
+![version](https://img.shields.io/badge/worker-v1.11.0-blue)
 
 **بتعمل إيه:** بتسجّل رجوع الطرد **للمخزن**. الموظف بيسكن باركود الأوردر
 المرتجع أو الملغي، والأداة بتكتب `custom.package_whereabouts_s1` (أو `_s2`
 لدورة الاستبدال/الاسترجاع) بقيمة **`Warehouse`**.
 **مين بيستخدمها:** المخزن
-**الإصدار:** `1.10.0` (`WORKER_VERSION` في `index.js`)
+**الإصدار:** `1.11.0` (`WORKER_VERSION` في `index.js`)
 
 > 🔴 **الريبو ده Worker وبس — مفيش واجهة هنا ومفيش نسخة مستقلة** (نفس قرار
 > `Package-Transfer-To-Office` بالحرف). الواجهة الوحيدة هي
@@ -21,6 +21,28 @@
 > المسجّلة في `ecommoda-order-lifecycle` → `references/package-whereabouts.md`
 > §5، واللي `Package-Transfer-To-Office/CLAUDE.md` سابها بند مفتوح صريح:
 > «الطرد اللي عهدته `Office` والأوردر ملغي/مرتجع → سكان يرجّعه `Warehouse`».
+
+## 🔴 v1.11.0 — `receive_item` بقى بيسيب صف في «سجل العمليات» (طلب أحمد 08-11-2026)
+
+**الباج/الثغرة:** استلام القطعة السايبة (`receive_item` — سكان باركود أو «استلام يدوي» من تاب «منتجات التسليم الجزئي») كان بيقفل سطر الدفتر `warehouse_return_items` بس ومابيكتبش أي صف في `logs`. النتيجة: تاب «سجل العمليات» ما بيبيّنش الاستلام ده خالص. واقعة #64511: القطعة اتسلّمت بسكان (`Akram_Mahmoud` · 11:53Z) واختفت من التاب، ومفيش أي أثر في السجل — الدليل الوحيد كان صف الدفتر نفسه.
+
+**الإصلاح:** كل نداء `receive_item` بيسيب **صف واحد** (نفس قاعدة «كل سكانة بتسيب صف»):
+
+| النتيجة | `type` | `extra.result` | `extra.stage` |
+|---|---|---|---|
+| قطعة اتقفلت | `update` | `success` | `write` |
+| السطر اتسلّم قبل كده / آخر قطعة بالباركود اتسلّمت | `rejected` | `already` | `lookup` |
+| مفيش قطعة بالباركود/الـ id | `rejected` | `rejected` (`code: not_found`) | `lookup` |
+| تعارض مع جهاز تاني (٣ محاولات) | `rejected` | `rejected` (`code: conflict`) | `lookup` |
+
+- مفاتيح `extra` على صف النجاح: `looseItem: true` · `receiveMode` (`scan`/`manual`) · `ledgerId` · `ledgerSource` · `wasStatus` (`pending`/`missing`) · `scanned` · `units: 1` · **`items: [{ sku, qty: 1 }]`** (عشان عمود «المنتجات» في تاب السجل يعرضه) · `machine` (`S1`/`S2` من صف الدفتر — فلتر الماكينة شغّال) · `cairoDate`.
+- ✅ **صفر قيمة `type` جديدة** (`update`/`rejected` مسجّلتين) — `log-values.json` ما اتغيّرش و`check-log-values.mjs` تمام.
+- ⚠️ **`value_before`/`value_after` فاضيين عن قصد** — القطعة السايبة مابتكتبش عهدة الطرد (دي مسؤولية `receive_order`).
+- ⚠️ **فشل كتابة السجل مايكسرش الاستلام** (القطعة اتقفلت فعلاً) — بيرجع `logged: false` + `logError` في الرد زي باقي الـ handlers.
+- ⚠️ **صفوف قبل `1.11.0` مالهاش أثر** — مفيش backfill. أي استلام سايب قبل النشر موجود في الدفتر بس (`received_by`/`received_at`/`receive_mode`).
+- 🔴 **الواجهة ما اتلمستش** — تاب السجل بيفلتر بـ`extra.sourceTool` ويعرض `extra.items`/`extra.machine` أصلاً، والصفوف الجديدة بنفس الشكل. عقد الرد ما اتغيّرش (اتضاف `logged` بس) فمفيش رفع لـ`warehouse.min`.
+- ✅ مقاس: اتجرّب على SQLite حقيقي (`node:sqlite`) بمخطط الدفتر وجدول `logs`: ٦ نداءات (سكان نجاح · already · باركود مجهول · يدوي نجاح · يدوي already · id مش موجود) = ٦ صفوف بالظبط، وكلها ظاهرة في `get_logs` وبتتفلتر بـ`machines`. ⚠️ **ما اتجرّبش على D1 الحقيقي.**
+- 🔴 **Promote مطلوب** بعد النشر.
 
 ## 🔴 v1.10.0 — تابين جداد: «أوردرات معدّلة» و«تحويل بوسطة» (طلب أحمد 25-10-2026)
 
@@ -228,7 +250,7 @@ function computeOrdersSince() {
 | **`order_items`** | **POST** | (v1.5.0) نفس الحكم + **قطع الطرد** — قراءة بحتة. الرفض/«خلاص متعمل» بيتسجّلوا صف `rejected` زي `scan` |
 | **`receive_order`** | **POST** | (v1.5.0) إعادة قراءة طازة + تحقق القطع → `metafieldsSet` (`Warehouse`) + سطور الدفتر + صف `update` |
 | `get_return_items` | GET | (v1.5.0) دفتر القطع: `pending` + `missing` (حد ٢٠٠٠) |
-| **`receive_item`** | **POST** | (v1.5.0) قفل سطر قطعة بالباركود (FIFO) أو بالـ `id` (يدوي) |
+| **`receive_item`** | **POST** | (v1.5.0) قفل سطر قطعة بالباركود (FIFO) أو بالـ `id` (يدوي) — 🔴 (v1.11.0) بيسيب صف في السجل |
 | `get_logs` · `get_logs_count` · `get_logs_export` | GET | تاب السجل |
 
 > 🔴 **مفيش `check_employee`/`register_pin`/`verify_employee`/`log_logout`
@@ -664,7 +686,7 @@ const STEP2_MAX_IDS   = 3000;  // حارس دفاعي على عدد المرشّ
 
 ---
 
-آخر تحديث: 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
+آخر تحديث: 08-11-2026 — `1.11.0` (`receive_item` بيسيب صف في «سجل العمليات») ثم 22-10-2026 — `1.7.0` (`s2Cycle` في الطابور: استبدال/استرجاع/غير معروف من `returns[]` في استعلام منفصل) ثم `1.6.0` (الاسترجاع الخالص: شرط التغليف على `s1_packing_date_time` للماكينتين · عمود `address` بدل `customer`/`createdAt` في الطابور) ثم `1.5.0` (الاستلام قطعة قطعة: `order_items` ·
 `receive_order` · `get_return_items` · `receive_item` + دفتر D1
 `warehouse_return_items`. `scan` والطابور ما اتلمسوش)
 
