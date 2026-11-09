@@ -6,6 +6,10 @@
 // skills: worker-builder v3.10.0 · constants v3.1.0 · order-lifecycle v1.8.0
 //         · shopify-graphql-helper v1.1.0 · html-builder v6.6.0 — 22-10-2026
 //
+// 🔴 **v1.12.0 (09-11-2026 · طلب أحمد) — ملاحظة على صف نجاح `scan` في تابَي «أوردرات معدّلة» و«تحويل بوسطة»:**
+//    `edited` → «تعديل الأوردر قبل الشحن - يجب إعادة التغليف» · `edited_bosta` → «تم التحويل لبوسطة» (`MODE_NOTE`).
+//    بتتحط قبل التحذيرات (لو فيه) بفاصل « · ». المرتجعات من غير ملاحظة. لوج بس: صفر تغيير في الرد أو الكتابة.
+//
 // 🔴 **v1.11.2 (08-11-2026 · طلب أحمد) — صيغة ملاحظة صف `receive_item` بقت «تسليم جزئي — SKU»** (كانت «استلام جزئي — SKU» في `1.11.1`). لوج بس.
 //
 // 🔴 **v1.11.1 (08-11-2026 · طلب أحمد) — صيغة ملاحظة صف `receive_item`:** «استلام جزئي — SKU» بدل «استلام قطعة سايبة (سكان/يدوي) — SKU».
@@ -61,7 +65,7 @@
 //    — صفر قيمة `type` جديدة، فـRule 7 مالهاش نطاق جديد هنا.
 const TOOL_NAME      = 'metafields_change';
 const SOURCE_TOOL    = 'package_transfer_to_warehouse';
-const WORKER_VERSION = '1.11.2';
+const WORKER_VERSION = '1.12.0';
 
 // ══════════════════════════════════════════════════════════════
 // §CONSTANTS
@@ -101,6 +105,13 @@ const S2_ELIGIBLE = new Set([S2_STATUS.RETURNED]);
 const S1_EDITED = new Set([S1_STATUS.CONFIRMED, S1_STATUS.CONFIRMED_EDIT]);
 const S2_EDITED = new Set([S2_STATUS.CONFIRMED_EXCHANGE]);
 const MODE = { RETURNED: 'returned', EDITED: 'edited', EDITED_BOSTA: 'edited_bosta' };
+
+// v1.12.0 — ملاحظة صف النجاح في `scan` حسب التاب (طلب أحمد 09-11-2026).
+// المرتجعات (`returned`) من غير ملاحظة — زي ما كانت.
+const MODE_NOTE = {
+  [MODE.EDITED]:       'تعديل الأوردر قبل الشحن - يجب إعادة التغليف',
+  [MODE.EDITED_BOSTA]: 'تم التحويل لبوسطة',
+};
 const BOSTA_ZONE = 'Other_Regions';
 // mode مجهول = `returned` (سلوك الصفحات القديمة بالحرف) — مش رفض.
 function parseMode(body) {
@@ -1388,7 +1399,7 @@ async function handleScan(env, request) {
     tool: TOOL_NAME, type: 'update', employee,
     orderId: order.orderId, orderName: order.orderName,
     valueBefore: before, valueAfter: error ? null : WA_TARGET,
-    notes: error || (v.warnings || []).join(' · ') || null,
+    notes: error || [MODE_NOTE[mode], ...(v.warnings || [])].filter(Boolean).join(' · ') || null,
     extra: {
       sourceTool: SOURCE_TOOL,
       result, stage: 'write', machine: machineLabel(v.machine), mode,
